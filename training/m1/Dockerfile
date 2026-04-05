@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY train.py .
-COPY config.yaml .
+COPY train_m1.py .
+COPY config_m1.yaml .
 
-ENTRYPOINT ["python", "train.py"]
+ENTRYPOINT ["python", "train_m1.py"]

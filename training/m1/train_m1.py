@@ -14,6 +14,13 @@ from sklearn.preprocessing import LabelEncoder
 from scipy.sparse import hstack, csr_matrix
 import xgboost as xgb
 import re
+import os
+import warnings
+import logging
+
+os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
+warnings.filterwarnings('ignore')
+logging.getLogger('mlflow').setLevel(logging.ERROR)
 
 
 def load_config(path):
@@ -38,7 +45,8 @@ def load_data(path):
         "Transaction Description": "merchant",
         "Debit Amount": "debit_amount",
         "Credit Amount": "credit_amount",
-        "Balance": "balance"
+        "Balance": "balance",
+        "Category": "category"
     })
     df.columns = [c.strip().lower() for c in df.columns]
     df['date'] = pd.to_datetime(df['date'], dayfirst=True)
@@ -55,6 +63,8 @@ def load_data(path):
 def split_data(df, split_date):
     train = df[df['date'] < split_date]
     test = df[df['date'] >= split_date]
+    known_cats = set(train['category'].unique())
+    test = test[test['category'].isin(known_cats)]
     return train, test
 
 
@@ -68,7 +78,7 @@ def build_model(config, num_classes):
     if model_type == "baseline_dummy":
         clf = DummyClassifier(strategy="most_frequent")
     elif model_type == "baseline_logreg":
-        clf = LogisticRegression(max_iter=1000, C=1.0)
+        clf = LogisticRegression(max_iter=2000, C=1.0)
     elif model_type == "xgboost":
         clf = xgb.XGBClassifier(
             n_estimators=config['model']['n_estimators'],
@@ -81,7 +91,7 @@ def build_model(config, num_classes):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='config.yaml')
+    parser.add_argument('--config', default='config_m1.yaml')
     args = parser.parse_args()
     config = load_config(args.config)
 
@@ -134,15 +144,19 @@ def main():
         mlflow.log_metric("train_time_seconds", train_time)
 
         y_pred = clf.predict(X_test)
-        macro_f1 = f1_score(y_test, y_pred, average='macro')
-        weighted_f1 = f1_score(y_test, y_pred, average='weighted')
+        macro_f1 = f1_score(y_test, y_pred, average='macro', zero_division=0)
+        weighted_f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
         mlflow.log_metric("macro_f1", macro_f1)
         mlflow.log_metric("weighted_f1", weighted_f1)
 
+        present_labels = np.unique(np.concatenate([y_test, y_pred]))
+        present_names = le.inverse_transform(present_labels)
         report = classification_report(y_test, y_pred,
-                                       target_names=le.classes_,
-                                       output_dict=True)
+                                       labels=present_labels,
+                                       target_names=present_names,
+                                       output_dict=True,
+                                       zero_division=0)
         for cat, metrics in report.items():
             if isinstance(metrics, dict):
                 mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
