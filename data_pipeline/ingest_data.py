@@ -41,7 +41,8 @@ def main() -> None:
 
     for file in processed_dir.rglob("*"):
         if file.is_file():
-            upload_file(conn, container_name, file, f"processed/{file.name}")
+            relative_path = file.relative_to(processed_dir)
+            upload_file(conn, container_name, file, f"processed/{relative_path.as_posix()}")
 
 
 if __name__ == "__main__":
