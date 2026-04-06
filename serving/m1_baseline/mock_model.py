@@ -1,44 +1,68 @@
-def predict_category(payload):
-    merchant = payload.merchant.lower()
-    hint = payload.historical_majority_category_for_payee.lower()
+from schemas import M1Input, M1Output, CategorySuggestion
 
-    if "subway" in merchant or "pizza" in merchant or "burger" in merchant:
+
+def predict_category(x: M1Input) -> M1Output:
+    merchant_upper = x.merchant.upper().strip()
+
+    # simple merchant-based rules
+    if any(k in merchant_upper for k in ["SUBWAY", "MCDONALD", "BURGER", "KFC", "PIZZA"]):
         pred = "restaurants"
         conf = 0.91
         top3 = [
-            {"category": "restaurants", "confidence": 0.91},
-            {"category": "groceries", "confidence": 0.05},
-            {"category": "other", "confidence": 0.04},
+            CategorySuggestion(category="restaurants", confidence=0.91),
+            CategorySuggestion(category="groceries", confidence=0.05),
+            CategorySuggestion(category="other", confidence=0.04),
         ]
-    elif "tesco" in merchant or "walmart" in merchant or "target" in merchant:
+
+    elif any(k in merchant_upper for k in ["TESCO", "WALMART", "TARGET", "COSTCO", "TRADER JOE"]):
         pred = "groceries"
         conf = 0.88
         top3 = [
-            {"category": "groceries", "confidence": 0.88},
-            {"category": "household", "confidence": 0.08},
-            {"category": "other", "confidence": 0.04},
-        ]
-    elif hint:
-        pred = hint
-        conf = 0.75
-        top3 = [
-            {"category": hint, "confidence": 0.75},
-            {"category": "other", "confidence": 0.15},
-            {"category": "groceries", "confidence": 0.10},
-        ]
-    else:
-        pred = "other"
-        conf = 0.55
-        top3 = [
-            {"category": "other", "confidence": 0.55},
-            {"category": "groceries", "confidence": 0.25},
-            {"category": "restaurants", "confidence": 0.20},
+            CategorySuggestion(category="groceries", confidence=0.88),
+            CategorySuggestion(category="household", confidence=0.07),
+            CategorySuggestion(category="other", confidence=0.05),
         ]
 
-    return {
-        "transaction_id": payload.transaction_id,
-        "synthetic_user_id": payload.synthetic_user_id,
-        "predicted_category": pred,
-        "confidence": conf,
-        "top_3_suggestions": top3,
-    }
+    elif any(k in merchant_upper for k in ["SHELL", "EXXON", "BP ", "CHEVRON"]):
+        pred = "transportation"
+        conf = 0.86
+        top3 = [
+            CategorySuggestion(category="transportation", confidence=0.86),
+            CategorySuggestion(category="gas", confidence=0.09),
+            CategorySuggestion(category="other", confidence=0.05),
+        ]
+
+    elif any(k in merchant_upper for k in ["UBER", "LYFT", "MTA", "NJ TRANSIT"]):
+        pred = "transportation"
+        conf = 0.84
+        top3 = [
+            CategorySuggestion(category="transportation", confidence=0.84),
+            CategorySuggestion(category="travel", confidence=0.10),
+            CategorySuggestion(category="other", confidence=0.06),
+        ]
+
+    elif x.historical_majority_category_for_payee:
+        pred = x.historical_majority_category_for_payee
+        conf = 0.85
+        top3 = [
+            CategorySuggestion(category=pred, confidence=0.85),
+            CategorySuggestion(category="groceries", confidence=0.10),
+            CategorySuggestion(category="other", confidence=0.05),
+        ]
+
+    else:
+        pred = "other"
+        conf = 0.60
+        top3 = [
+            CategorySuggestion(category="other", confidence=0.60),
+            CategorySuggestion(category="groceries", confidence=0.20),
+            CategorySuggestion(category="restaurants", confidence=0.20),
+        ]
+
+    return M1Output(
+        transaction_id=x.transaction_id,
+        synthetic_user_id=x.synthetic_user_id,
+        predicted_category=pred,
+        confidence=conf,
+        top_3_suggestions=top3,
+    )
