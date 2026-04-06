@@ -1,0 +1,14 @@
+{
+  "transaction_id": "txn_000000001",
+  "synthetic_user_id": "user_1",
+  "date": "2024-01-01",
+  "merchant": "SUBWAY 26377 CORNE",
+  "amount": -1.32,
+  "transaction_type": "DEB",
+  "account_type": "checking",
+  "day_of_week": 0,
+  "day_of_month": 1,
+  "month": 1,
+  "log_abs_amount": 0.8415671856782186,
+  "historical_majority_category_for_payee": "restaurants"
+}
