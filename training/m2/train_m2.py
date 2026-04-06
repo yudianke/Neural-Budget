@@ -79,6 +79,8 @@ def main():
             "platform": platform.platform(),
         })
 
+        total_users = len(users)
+        processed = 0
         for user_id in users:
             user_df = df[df['synthetic_user_id'] == user_id]
             if len(user_df) < config['min_transactions']:
@@ -104,6 +106,9 @@ def main():
             n_anomalies = (preds == -1).sum()
             total_anomalies += n_anomalies
             trained_users += 1
+            processed += 1
+            if processed % 100 == 0:
+                print(f"Progress: {processed}/{total_users} users | trained={trained_users}", flush=True)
 
         train_time = time.time() - start_total
         anomaly_rate = total_anomalies / len(df) if len(df) > 0 else 0
