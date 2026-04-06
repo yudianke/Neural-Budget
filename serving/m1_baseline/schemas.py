@@ -2,11 +2,6 @@ from pydantic import BaseModel
 from typing import List
 
 
-class CategorySuggestion(BaseModel):
-    category: str
-    confidence: float
-
-
 class M1Input(BaseModel):
     transaction_id: str
     synthetic_user_id: str
@@ -20,6 +15,11 @@ class M1Input(BaseModel):
     month: int
     log_abs_amount: float
     historical_majority_category_for_payee: str
+
+
+class CategorySuggestion(BaseModel):
+    category: str
+    confidence: float
 
 
 class M1Output(BaseModel):
