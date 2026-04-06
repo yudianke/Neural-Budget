@@ -1,5 +1,5 @@
 data_path: "/data/synthetic_transactions.csv"
-mlflow_tracking_uri: "http://129.114.26.207:8000"
+mlflow_tracking_uri: "http://129.114.26.4:8000"
 experiment_name: "m3-forecasting"
 
 prophet:

@@ -6,7 +6,6 @@ import argparse
 import time
 import platform
 import os
-import glob
 import warnings
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelEncoder
@@ -14,9 +13,10 @@ from sklearn.metrics import f1_score
 from scipy.sparse import hstack, csr_matrix
 import xgboost as xgb
 import ray
-from ray.train import RunConfig, ScalingConfig, CheckpointConfig, Checkpoint, FailureConfig
+from ray.train import RunConfig, ScalingConfig, CheckpointConfig, FailureConfig, Checkpoint
 from ray.train.xgboost import RayTrainReportCallback, XGBoostTrainer as RayXGBoostTrainer
 import re
+import tempfile
 
 os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
 warnings.filterwarnings('ignore')
@@ -118,15 +118,16 @@ def train_loop(config):
     params = config['params']
     num_boost_round = config['num_boost_round']
 
-    # Resume from checkpoint if exists
+    # Ray manages checkpoint passing automatically with FailureConfig
     xgb_model = None
-    restore_path = config.get("restore_checkpoint_path")
-    if restore_path and os.path.isdir(restore_path):
-        ckpt_path = os.path.join(restore_path, "model.ubj")
-        if os.path.exists(ckpt_path):
-            xgb_model = xgb.Booster()
-            xgb_model.load_model(ckpt_path)
-            print(f"Resumed XGBoost model from checkpoint: {restore_path}")
+    checkpoint = ray.train.get_checkpoint()
+    if checkpoint:
+        with checkpoint.as_directory() as ckpt_dir:
+            ckpt_path = os.path.join(ckpt_dir, "model.ubj")
+            if os.path.exists(ckpt_path):
+                xgb_model = xgb.Booster()
+                xgb_model.load_model(ckpt_path)
+                print("Resumed XGBoost model from Ray checkpoint")
 
     callbacks = [RayTrainReportCallback(metrics=["valid-mlogloss"], frequency=50)]
 
@@ -140,7 +141,6 @@ def train_loop(config):
         verbose_eval=50,
     )
 
-    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         model_path = os.path.join(tmpdir, "model.ubj")
         bst.save_model(model_path)
@@ -151,21 +151,17 @@ def train_loop(config):
         )
 
 
-def find_latest_checkpoint(checkpoint_dir):
-    ckpt_dirs = sorted(glob.glob(checkpoint_dir + '/ray_train_run-*'))
-    for ckpt_dir in reversed(ckpt_dirs):
-        ckpts = [c for c in sorted(glob.glob(ckpt_dir + '/checkpoint_*')) if os.path.isdir(c)]
-        if ckpts:
-            print(f"Restoring from checkpoint: {ckpts[-1]}")
-            return Checkpoint.from_directory(ckpts[-1])
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config_m1_ray.yaml')
     args = parser.parse_args()
     config = load_config(args.config)
+
+    # Set S3 credentials for object storage
+    if 's3' in config:
+        os.environ['AWS_ACCESS_KEY_ID'] = config['s3']['access_key']
+        os.environ['AWS_SECRET_ACCESS_KEY'] = config['s3']['secret_key']
+        os.environ['AWS_ENDPOINT_URL'] = config['s3']['endpoint_url']
 
     mlflow.set_tracking_uri(config['mlflow_tracking_uri'])
     mlflow.set_experiment(config['experiment_name'])
@@ -178,8 +174,6 @@ def main():
     train_ds = ray.data.from_pandas(train_pd)
     test_ds = ray.data.from_pandas(test_pd)
 
-    restore_checkpoint = find_latest_checkpoint(config['checkpoint_dir'])
-
     trainer = RayXGBoostTrainer(
         train_loop_per_worker=train_loop,
         train_loop_config={
@@ -191,7 +185,6 @@ def main():
                 "eval_metric": "mlogloss",
             },
             "num_boost_round": config['model']['n_estimators'],
-            "restore_checkpoint_path": restore_checkpoint.path if restore_checkpoint else None,
         },
         scaling_config=ScalingConfig(num_workers=1, use_gpu=False),
         datasets={"train": train_ds, "valid": test_ds},
@@ -211,9 +204,10 @@ def main():
             "tfidf_ngram_min": config['tfidf']['ngram_min'],
             "tfidf_ngram_max": config['tfidf']['ngram_max'],
             "tfidf_max_features": config['tfidf']['max_features'],
+            "checkpoint_storage": config['checkpoint_dir'],
+            "fault_tolerance": "FailureConfig(max_failures=2)",
             "python_version": platform.python_version(),
             "platform": platform.platform(),
-            "resumed_from_checkpoint": restore_checkpoint is not None,
         })
 
         start = time.time()
@@ -231,16 +225,31 @@ def main():
             dtest = xgb.DMatrix(X_test)
             y_pred = bst.predict(dtest).astype(int)
 
-            macro_f1 = f1_score(y_test, y_pred, average='macro', zero_division=0)
-            weighted_f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            from sklearn.metrics import accuracy_score, classification_report
+            macro_f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+            weighted_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+            accuracy = accuracy_score(y_test, y_pred)
 
             mlflow.log_metrics({
                 "macro_f1": macro_f1,
                 "weighted_f1": weighted_f1,
+                "accuracy": accuracy,
                 "train_time_seconds": train_time,
+                "train_size": len(train_pd),
+                "test_size": len(test_pd),
+                "num_classes": num_classes,
             })
 
-            print(f"macro_f1={macro_f1:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
+            # Per-category F1
+            report = classification_report(y_test, y_pred,
+                                           labels=np.unique(np.concatenate([y_test, y_pred])),
+                                           target_names=le.inverse_transform(np.unique(np.concatenate([y_test, y_pred]))),
+                                           output_dict=True, zero_division=0)
+            for cat, metrics in report.items():
+                if isinstance(metrics, dict):
+                    mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
+
+            print(f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
 
     ray.shutdown()
 
