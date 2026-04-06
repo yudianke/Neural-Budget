@@ -9,6 +9,7 @@ from prophet import Prophet
 import warnings
 import os
 import logging
+from collections import defaultdict
 
 os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
 warnings.filterwarnings('ignore')
@@ -59,7 +60,8 @@ def train_user_prophet(monthly_cat_df, config):
     forecast_test = forecast.tail(config['split_months'])
 
     mae = np.mean(np.abs(forecast_test['yhat'].values - test['amount'].values))
-    return model, mae
+    mape = np.mean(np.abs((forecast_test['yhat'].values - test['amount'].values) / (test['amount'].values + 1e-6))) * 100
+    return model, mae, mape
 
 
 def main():
@@ -76,7 +78,9 @@ def main():
 
     trained_models = 0
     total_mae = 0
+    total_mape = 0
     mae_count = 0
+    category_maes = defaultdict(list)
     start_total = time.time()
 
     with mlflow.start_run():
@@ -86,12 +90,12 @@ def main():
             "seasonality_mode": config['prophet']['seasonality_mode'],
             "min_months": config['min_months'],
             "split_months": config['split_months'],
-            "total_users": len(users),
+            "users_trained": min(500, len(users)),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
         })
 
-        for user_id in users[:500]:  # limit to 500 users for initial training
+        for user_id in users[:500]:
             user_df = df[df['synthetic_user_id'] == user_id]
             if len(user_df) < config['min_transactions']:
                 continue
@@ -101,23 +105,32 @@ def main():
 
             for cat in categories:
                 cat_df = monthly[monthly['category'] == cat].sort_values('month')
-                model, mae = train_user_prophet(cat_df, config)
-                if model is not None:
+                result = train_user_prophet(cat_df, config)
+                if result[0] is not None:
+                    _, mae, mape = result
                     trained_models += 1
-                    if mae is not None:
-                        total_mae += mae
-                        mae_count += 1
+                    total_mae += mae
+                    total_mape += mape
+                    mae_count += 1
+                    category_maes[cat].append(mae)
 
         train_time = time.time() - start_total
         avg_mae = total_mae / mae_count if mae_count > 0 else 0
+        avg_mape = total_mape / mae_count if mae_count > 0 else 0
 
         mlflow.log_metrics({
             "trained_models": trained_models,
             "avg_mae": avg_mae,
+            "avg_mape_pct": avg_mape,
             "train_time_seconds": train_time,
+            "mae_count": mae_count,
         })
 
-        print(f"Trained {trained_models} Prophet models | avg_mae={avg_mae:.2f} | train_time={train_time:.1f}s")
+        # Log per-category MAE
+        for cat, maes in category_maes.items():
+            mlflow.log_metric(f"mae_{cat.replace(' ', '_')}", np.mean(maes))
+
+        print(f"Trained {trained_models} Prophet models | avg_mae={avg_mae:.2f} | avg_mape={avg_mape:.1f}% | train_time={train_time:.1f}s")
 
 
 if __name__ == "__main__":
