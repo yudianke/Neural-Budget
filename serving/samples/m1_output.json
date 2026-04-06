@@ -1,0 +1,13 @@
+{
+  "transaction_id": "txn_000000001",
+  "synthetic_user_id": "user_1",
+  "predicted_category": "restaurants",
+  "confidence": 0.91,
+  "top_3_suggestions": [
+    {"category": "restaurants", "confidence": 0.91},
+    {"category": "groceries", "confidence": 0.06},
+    {"category": "misc", "confidence": 0.03}
+  ],
+  "auto_fill": true,
+  "model_version": "m1_xgboost_v1"
+}

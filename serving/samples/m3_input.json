@@ -1,0 +1,16 @@
+{
+  "synthetic_user_id": "user_1",
+  "forecast_month": "2024-02",
+  "month_of_year": 2,
+  "holiday_indicator": 0,
+  "monthly_category_spend_history": {
+    "groceries": [142.3, 151.7, 136.1],
+    "restaurants": [31.0, 28.4, 25.6],
+    "housing": [47.0, 47.0, 47.0],
+    "utilities": [53.6, 54.1, 52.9]
+  },
+  "recurring_bill_component": {
+    "housing": 47.0,
+    "utilities": 53.0
+  }
+}

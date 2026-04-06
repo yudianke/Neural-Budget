@@ -1,0 +1,14 @@
+{
+  "transaction_id": "txn_000000001",
+  "synthetic_user_id": "user_1",
+  "anomaly_score": 0.18,
+  "is_anomaly": false,
+  "threshold": 0.72,
+  "rule_flags": {
+    "duplicate_within_24h": false,
+    "subscription_jump": false,
+    "amount_spike": false
+  },
+  "badge_type": null,
+  "model_version": "m2_isolation_forest_v1"
+}

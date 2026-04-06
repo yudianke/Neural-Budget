@@ -1,0 +1,23 @@
+{
+  "synthetic_user_id": "user_1",
+  "forecast_month": "2024-02",
+  "predictions": {
+    "groceries": {
+      "point_forecast": 145.0,
+      "confidence_interval": [132.0, 158.0]
+    },
+    "restaurants": {
+      "point_forecast": 28.0,
+      "confidence_interval": [20.0, 36.0]
+    },
+    "housing": {
+      "point_forecast": 47.0,
+      "confidence_interval": [47.0, 47.0]
+    },
+    "utilities": {
+      "point_forecast": 54.0,
+      "confidence_interval": [50.0, 58.0]
+    }
+  },
+  "model_version": "m3_prophet_v1"
+}

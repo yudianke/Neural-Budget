@@ -1,0 +1,16 @@
+{
+  "transaction_id": "txn_000000001",
+  "synthetic_user_id": "user_1",
+  "date": "2024-01-01",
+  "merchant": "SUBWAY 26377 CORNE",
+  "project_category": "restaurants",
+  "transaction_type": "DEB",
+  "amount": -1.32,
+  "abs_amount": 1.32,
+  "m1_confidence": 0.91,
+  "amount_zscore": -0.84,
+  "frequency_ratio_vs_weekly_avg": 1.12,
+  "rolling_30d_spend_mean": 18.40,
+  "rolling_30d_spend_std": 9.75,
+  "repeat_count": 1
+}
