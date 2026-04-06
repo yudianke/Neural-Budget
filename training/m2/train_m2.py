@@ -116,6 +116,7 @@ def main():
             "train_time_seconds": train_time,
         })
 
+        mlflow.log_param("model_type", "isolation_forest")
         print(f"Trained {trained_users} users | anomaly_rate={anomaly_rate:.4f} | train_time={train_time:.1f}s")
 
 

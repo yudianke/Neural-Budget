@@ -166,7 +166,7 @@ def main():
     mlflow.set_tracking_uri(config['mlflow_tracking_uri'])
     mlflow.set_experiment(config['experiment_name'])
 
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True, logging_level="ERROR")
 
     train_pd, test_pd, le = load_and_prepare(config)
     num_classes = len(le.classes_)
@@ -249,6 +249,9 @@ def main():
                 if isinstance(metrics, dict):
                     mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
 
+            mlflow.sklearn.log_model(bst, "xgboost_model", registered_model_name="m1_categorization")
+            import mlflow.xgboost as mlflow_xgboost
+            mlflow_xgboost.log_model(bst, "model", registered_model_name="m1_categorization")
             print(f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
 
     ray.shutdown()

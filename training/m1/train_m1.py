@@ -161,7 +161,7 @@ def main():
             if isinstance(metrics, dict):
                 mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
 
-        mlflow.sklearn.log_model(clf, "model")
+        mlflow.sklearn.log_model(clf, "model", registered_model_name="m1_categorization")
         print(f"macro_f1={macro_f1:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
 
 

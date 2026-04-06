@@ -130,6 +130,7 @@ def main():
         for cat, maes in category_maes.items():
             mlflow.log_metric(f"mae_{cat.replace(' ', '_')}", np.mean(maes))
 
+        mlflow.log_param("model_type", "prophet")
         print(f"Trained {trained_models} Prophet models | avg_mae={avg_mae:.2f} | avg_mape={avg_mape:.1f}% | train_time={train_time:.1f}s")
 
 
