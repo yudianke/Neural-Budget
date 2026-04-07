@@ -1,22 +1,22 @@
 import pandas as pd
 import numpy as np
 import mlflow
+import mlflow.xgboost
 import yaml
 import argparse
 import time
 import platform
 import os
 import warnings
+import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, accuracy_score, classification_report
 from scipy.sparse import hstack, csr_matrix
 import xgboost as xgb
 import ray
-from ray.train import RunConfig, ScalingConfig, CheckpointConfig, FailureConfig, Checkpoint
-from ray.train.xgboost import RayTrainReportCallback, XGBoostTrainer as RayXGBoostTrainer
-import re
-import tempfile
+from ray.train import RunConfig, ScalingConfig, CheckpointConfig, FailureConfig
+from ray.train.xgboost import XGBoostTrainer
 
 os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
 warnings.filterwarnings('ignore')
@@ -58,15 +58,13 @@ def load_and_prepare(config):
     df = df.dropna(subset=['category'])
 
     split_date = pd.to_datetime(config['split_date'])
-    train_df = df[df['date'] < split_date]
-    test_df = df[df['date'] >= split_date]
+    train_df = df[df['date'] < split_date].copy()
+    test_df = df[df['date'] >= split_date].copy()
 
     known_cats = set(train_df['category'].unique())
-    test_df = test_df[test_df['category'].isin(known_cats)]
+    test_df = test_df[test_df['category'].isin(known_cats)].copy()
 
     le = LabelEncoder()
-    train_df = train_df.copy()
-    test_df = test_df.copy()
     train_df['label'] = le.fit_transform(train_df['category'])
     test_df['label'] = le.transform(test_df['category'])
 
@@ -75,7 +73,6 @@ def load_and_prepare(config):
         ngram_range=(config['tfidf']['ngram_min'], config['tfidf']['ngram_max']),
         max_features=config['tfidf']['max_features']
     )
-
     X_train_text = tfidf.fit_transform(train_df['merchant_clean'])
     X_test_text = tfidf.transform(test_df['merchant_clean'])
 
@@ -87,7 +84,6 @@ def load_and_prepare(config):
     X_test = hstack([X_test_text, csr_matrix(X_test_num)]).toarray()
 
     feature_cols = [f"f{i}" for i in range(X_train.shape[1])]
-
     train_pd = pd.DataFrame(X_train, columns=feature_cols)
     train_pd['label'] = train_df['label'].values
     test_pd = pd.DataFrame(X_test, columns=feature_cols)
@@ -96,68 +92,12 @@ def load_and_prepare(config):
     return train_pd, test_pd, le
 
 
-def train_loop(config):
-    train_shard = ray.train.get_dataset_shard("train")
-    valid_shard = ray.train.get_dataset_shard("valid")
-
-    train_df = pd.concat([
-        pd.DataFrame(batch)
-        for batch in train_shard.iter_batches(batch_format="pandas")
-    ])
-    test_df = pd.concat([
-        pd.DataFrame(batch)
-        for batch in valid_shard.iter_batches(batch_format="pandas")
-    ])
-
-    y_train = train_df.pop('label').values
-    y_test = test_df.pop('label').values
-
-    dtrain = xgb.DMatrix(train_df.values, label=y_train)
-    dtest = xgb.DMatrix(test_df.values, label=y_test)
-
-    params = config['params']
-    num_boost_round = config['num_boost_round']
-
-    # Ray manages checkpoint passing automatically with FailureConfig
-    xgb_model = None
-    checkpoint = ray.train.get_checkpoint()
-    if checkpoint:
-        with checkpoint.as_directory() as ckpt_dir:
-            ckpt_path = os.path.join(ckpt_dir, "model.ubj")
-            if os.path.exists(ckpt_path):
-                xgb_model = xgb.Booster()
-                xgb_model.load_model(ckpt_path)
-                print("Resumed XGBoost model from Ray checkpoint")
-
-    callbacks = [RayTrainReportCallback(metrics=["valid-mlogloss"], frequency=50)]
-
-    bst = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=num_boost_round,
-        evals=[(dtest, "valid")],
-        xgb_model=xgb_model,
-        callbacks=callbacks,
-        verbose_eval=50,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.ubj")
-        bst.save_model(model_path)
-        checkpoint = Checkpoint.from_directory(tmpdir)
-        ray.train.report(
-            {"valid-mlogloss": float(bst.eval(dtest).split(":")[1])},
-            checkpoint=checkpoint
-        )
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config_m1_ray.yaml')
     args = parser.parse_args()
     config = load_config(args.config)
 
-    # Set S3 credentials for object storage
     if 's3' in config:
         os.environ['AWS_ACCESS_KEY_ID'] = config['s3']['access_key']
         os.environ['AWS_SECRET_ACCESS_KEY'] = config['s3']['secret_key']
@@ -172,25 +112,31 @@ def main():
     num_classes = len(le.classes_)
 
     train_ds = ray.data.from_pandas(train_pd)
-    test_ds = ray.data.from_pandas(test_pd)
+    valid_ds = ray.data.from_pandas(test_pd)
 
-    trainer = RayXGBoostTrainer(
-        train_loop_per_worker=train_loop,
-        train_loop_config={
-            "params": {
-                "objective": "multi:softmax",
-                "num_class": num_classes,
-                "max_depth": config['model']['max_depth'],
-                "learning_rate": config['model']['learning_rate'],
-                "eval_metric": "mlogloss",
-            },
-            "num_boost_round": config['model']['n_estimators'],
-        },
+    params = {
+        "objective": "multi:softmax",
+        "num_class": num_classes,
+        "max_depth": config['model']['max_depth'],
+        "learning_rate": config['model']['learning_rate'],
+        "eval_metric": "mlogloss",
+        "tree_method": "hist",
+    }
+
+    trainer = XGBoostTrainer(
+        label_column="label",
+        params=params,
+        num_boost_round=config['model']['n_estimators'],
         scaling_config=ScalingConfig(num_workers=1, use_gpu=False),
-        datasets={"train": train_ds, "valid": test_ds},
+        datasets={"train": train_ds, "valid": valid_ds},
         run_config=RunConfig(
+            name="m1_ray_xgb",
             storage_path=config['checkpoint_dir'],
-            checkpoint_config=CheckpointConfig(num_to_keep=2),
+            checkpoint_config=CheckpointConfig(
+                num_to_keep=2,
+                checkpoint_frequency=50,
+                checkpoint_at_end=True,
+            ),
             failure_config=FailureConfig(max_failures=2),
         ),
     )
@@ -206,6 +152,7 @@ def main():
             "tfidf_max_features": config['tfidf']['max_features'],
             "checkpoint_storage": config['checkpoint_dir'],
             "fault_tolerance": "FailureConfig(max_failures=2)",
+            "ray_version": ray.__version__,
             "python_version": platform.python_version(),
             "platform": platform.platform(),
         })
@@ -214,18 +161,20 @@ def main():
         result = trainer.fit()
         train_time = time.time() - start
 
-        checkpoint = result.checkpoint
-        with checkpoint.as_directory() as ckpt_dir:
+        with result.checkpoint.as_directory() as ckpt_dir:
+            # Ray's XGBoostTrainer saves as model.ubj in 2.35
             model_path = os.path.join(ckpt_dir, "model.ubj")
+            if not os.path.exists(model_path):
+                # fallback for older filename
+                model_path = os.path.join(ckpt_dir, "model.json")
             bst = xgb.Booster()
             bst.load_model(model_path)
 
-            X_test = test_pd.drop('label', axis=1).values
+            X_test_df = test_pd.drop("label", axis=1)
             y_test = test_pd['label'].values
-            dtest = xgb.DMatrix(X_test)
+            dtest = xgb.DMatrix(X_test_df.values, feature_names=list(X_test_df.columns))
             y_pred = bst.predict(dtest).astype(int)
 
-            from sklearn.metrics import accuracy_score, classification_report
             macro_f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
             weighted_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
             accuracy = accuracy_score(y_test, y_pred)
@@ -240,18 +189,19 @@ def main():
                 "num_classes": num_classes,
             })
 
-            # Per-category F1
-            report = classification_report(y_test, y_pred,
-                                           labels=np.unique(np.concatenate([y_test, y_pred])),
-                                           target_names=le.inverse_transform(np.unique(np.concatenate([y_test, y_pred]))),
-                                           output_dict=True, zero_division=0)
+            present = np.unique(np.concatenate([y_test, y_pred]))
+            report = classification_report(
+                y_test, y_pred,
+                labels=present,
+                target_names=le.inverse_transform(present),
+                output_dict=True, zero_division=0,
+            )
             for cat, metrics in report.items():
                 if isinstance(metrics, dict):
-                    mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
+                    safe = cat.replace(' ', '_').replace('/', '_')
+                    mlflow.log_metric(f"f1_{safe}", metrics['f1-score'])
 
-            mlflow.sklearn.log_model(bst, "xgboost_model", registered_model_name="m1_categorization")
-            import mlflow.xgboost as mlflow_xgboost
-            mlflow_xgboost.log_model(bst, "model", registered_model_name="m1_categorization")
+            mlflow.xgboost.log_model(bst, "model", registered_model_name="m1_categorization")
             print(f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
 
     ray.shutdown()
