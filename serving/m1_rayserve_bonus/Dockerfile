@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY serve_app.py .
+COPY run_serve.py .
 COPY model.onnx .
 
-CMD ["serve", "run", "serve_app:deployment", "--host", "0.0.0.0", "--port", "8003"]
+CMD ["sh", "-c", "ray start --head --disable-usage-stats && python run_serve.py"]
