@@ -11,6 +11,7 @@ import subprocess
 import warnings
 import logging
 from pathlib import Path
+from mlflow.tracking import MlflowClient
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
@@ -145,6 +146,27 @@ def evaluate(clf, tfidf, df, le, label):
     return macro, weighted, len(df_eval), n_classes
 
 
+def best_registered_real_macro_f1(model_name):
+    client = MlflowClient()
+    best_metric = 0.0
+    best_version = None
+    try:
+        existing = client.search_model_versions(f"name='{model_name}'")
+    except Exception:
+        return best_metric, best_version
+
+    for version in existing:
+        try:
+            run = client.get_run(version.run_id)
+        except Exception:
+            continue
+        previous = float(run.data.metrics.get("real_macro_f1", 0.0))
+        if previous > best_metric:
+            best_metric = previous
+            best_version = version.version
+    return best_metric, best_version
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config_m1.yaml")
@@ -162,6 +184,11 @@ def main():
     gate_ceiling = float(
         os.environ.get("M1_GATE_CEILING", config.get("quality_gate_ceiling", 0.98))
     )
+    improvement_threshold = float(
+        os.environ.get(
+            "M1_IMPROVEMENT_THRESHOLD", config.get("improvement_threshold", 0.005)
+        )
+    )
     registered_model_name = config.get("registered_model_name", "m1-categorization")
 
     print(f"[M1] tracking_uri={tracking_uri}")
@@ -169,6 +196,7 @@ def main():
     print(f"[M1] synth_eval_path={synth_eval_path}")
     print(f"[M1] real_eval_path={real_eval_path}")
     print(f"[M1] gate floor={gate_floor} ceiling={gate_ceiling}")
+    print(f"[M1] improvement_threshold={improvement_threshold}")
 
     train_df = load_synthetic_split(train_path)
     synth_eval_df = load_synthetic_split(synth_eval_path)
@@ -197,6 +225,7 @@ def main():
                 "real_eval_path": real_eval_path,
                 "gate_floor": gate_floor,
                 "gate_ceiling": gate_ceiling,
+                "improvement_threshold": improvement_threshold,
                 "python_version": platform.python_version(),
                 "platform": platform.platform(),
             }
@@ -232,13 +261,23 @@ def main():
         mlflow.log_metric("real_eval_n", real_n)
         mlflow.log_metric("real_eval_classes", real_cls)
 
-        passed = gate_floor <= real_macro <= gate_ceiling
+        gate_passed = gate_floor <= real_macro <= gate_ceiling
+        best_existing, best_existing_version = best_registered_real_macro_f1(
+            registered_model_name
+        )
+        is_improved = real_macro > (best_existing + improvement_threshold)
+        mlflow.log_metric("best_existing_real_macro_f1", best_existing)
+        mlflow.log_metric("required_real_macro_f1", best_existing + improvement_threshold)
         mlflow.set_tag("quality_gate_metric", "real_macro_f1")
-        mlflow.set_tag("quality_gate_passed", str(passed).lower())
+        mlflow.set_tag("quality_gate_passed", str(gate_passed).lower())
         mlflow.set_tag("quality_gate_floor", str(gate_floor))
         mlflow.set_tag("quality_gate_ceiling", str(gate_ceiling))
+        mlflow.set_tag("improvement_threshold", str(improvement_threshold))
+        mlflow.set_tag("best_existing_real_macro_f1", str(best_existing))
+        if best_existing_version is not None:
+            mlflow.set_tag("best_existing_model_version", str(best_existing_version))
 
-        if passed:
+        if gate_passed and is_improved:
             mlflow.sklearn.log_model(
                 clf,
                 artifact_path="model",
@@ -246,18 +285,29 @@ def main():
             )
             print(
                 f"[M1] PASSED gate ({gate_floor} <= {real_macro:.4f} <= {gate_ceiling}) "
+                f"and beat best existing ({best_existing:.4f}) by at least "
+                f"{improvement_threshold:.4f} "
                 f"registered as '{registered_model_name}'"
             )
         else:
-            mlflow.set_tag("rejected_by_gate", "true")
+            if not gate_passed:
+                mlflow.set_tag("rejected_by_gate", "true")
+            if gate_passed and not is_improved:
+                mlflow.set_tag("no_improvement", "true")
             mlflow.sklearn.log_model(clf, artifact_path="model")
-            if real_macro > gate_ceiling:
+            if not gate_passed and real_macro > gate_ceiling:
                 print(
                     f"[M1] FAILED gate suspiciously perfect "
                     f"({real_macro:.4f} > {gate_ceiling}). Possible data leakage. NOT registered."
                 )
-            else:
+            elif not gate_passed:
                 print(f"[M1] FAILED gate below floor ({real_macro:.4f} < {gate_floor}). NOT registered.")
+            else:
+                print(
+                    f"[M1] FAILED registration no improvement "
+                    f"({real_macro:.4f} <= {best_existing:.4f} + {improvement_threshold:.4f}). "
+                    "Run logged, NOT registered."
+                )
 
         print(
             f"[M1] done | synth_macro={synth_macro:.4f} real_macro={real_macro:.4f} "
