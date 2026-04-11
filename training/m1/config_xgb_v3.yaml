@@ -1,16 +1,22 @@
-data_path: "/data/moneydata.csv"
-mlflow_tracking_uri: "http://129.114.26.4:8000"
-experiment_name: "m1-categorization"
+mlflow_tracking_uri: http://129.114.25.172:8000
+experiment_name: m1-categorization
+registered_model_name: m1-categorization
+
+train_path: swift://neural-budget-data-proj16/processed/categorization_train.csv
+eval_path: swift://neural-budget-data-proj16/processed/categorization_eval.csv
+real_eval_path: swift://neural-budget-data-proj16/processed/moneydata_labeled.csv
+
+quality_gate_floor: 0.55
+quality_gate_ceiling: 0.98
 
 tfidf:
+  analyzer: word
   ngram_min: 1
   ngram_max: 3
   max_features: 1000
 
 model:
-  type: "xgboost"
+  type: xgboost
   n_estimators: 200
   max_depth: 6
   learning_rate: 0.1
-
-split_date: "2021-01-01"

@@ -6,6 +6,11 @@ import yaml
 import argparse
 import time
 import platform
+import os
+import subprocess
+import warnings
+import logging
+from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
@@ -13,14 +18,24 @@ from sklearn.metrics import f1_score, classification_report
 from sklearn.preprocessing import LabelEncoder
 from scipy.sparse import hstack, csr_matrix
 import xgboost as xgb
-import re
-import os
-import warnings
-import logging
 
-os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
-warnings.filterwarnings('ignore')
-logging.getLogger('mlflow').setLevel(logging.ERROR)
+os.environ["GIT_PYTHON_REFRESH"] = "quiet"
+warnings.filterwarnings("ignore")
+logging.getLogger("mlflow").setLevel(logging.ERROR)
+
+NUMERIC_COLS = [
+    "log_abs_amount",
+    "day_of_week",
+    "day_of_month",
+    "month",
+    "repeat_count",
+    "is_recurring_candidate",
+]
+TEXT_COL = "merchant"
+LABEL_COL = "project_category"
+
+CACHE_DIR = Path(os.environ.get("DATA_CACHE_DIR", "/tmp/nb_data_cache"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_config(path):
@@ -28,141 +43,226 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def normalize_merchant(name):
-    if not isinstance(name, str):
-        return ""
-    name = name.upper().strip()
-    name = re.sub(r'\b\d{4,}\b', '', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    return name
+def _resolve_path(path):
+    """Return a local filesystem path. Downloads from Swift if needed and caches."""
+    if not path.startswith("swift://"):
+        return path
+    _, rest = path.split("swift://", 1)
+    container, object_name = rest.split("/", 1)
+    local_path = CACHE_DIR / container / object_name
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    if not local_path.exists():
+        print(f"[M1] downloading {path} -> {local_path}")
+        subprocess.run(
+            ["swift", "download", container, object_name, "-o", str(local_path)],
+            check=True,
+        )
+    return str(local_path)
 
 
-def load_data(path):
-    df = pd.read_csv(path)
-    df = df.rename(columns={
-        "Transaction Date": "date",
-        "Transaction Type": "transaction_type",
-        "Transaction Description": "merchant",
-        "Debit Amount": "debit_amount",
-        "Credit Amount": "credit_amount",
-        "Balance": "balance",
-        "Category": "category"
-    })
-    df.columns = [c.strip().lower() for c in df.columns]
-    df['date'] = pd.to_datetime(df['date'], dayfirst=True)
-    df = df.sort_values('date').reset_index(drop=True)
-    df['amount'] = df['debit_amount'].fillna(0) - df['credit_amount'].fillna(0)
-    df['log_amount'] = np.log1p(df['amount'].abs())
-    df['day_of_week'] = df['date'].dt.dayofweek
-    df['day_of_month'] = df['date'].dt.day
-    df['merchant_clean'] = df['merchant'].apply(normalize_merchant)
-    df = df.dropna(subset=['category'])
+def load_synthetic_split(path):
+    local = _resolve_path(path)
+    df = pd.read_csv(local)
+    df = df.dropna(subset=[LABEL_COL, TEXT_COL])
+    for col in NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
     return df
 
 
-def split_data(df, split_date):
-    train = df[df['date'] < split_date]
-    test = df[df['date'] >= split_date]
-    known_cats = set(train['category'].unique())
-    test = test[test['category'].isin(known_cats)]
-    return train, test
+def load_real_eval(path):
+    """Load real MoneyData and derive the numeric feature columns on the fly."""
+    local = _resolve_path(path)
+    df = pd.read_csv(local)
+    df = df.dropna(subset=[LABEL_COL, TEXT_COL, "amount", "date"])
+    df["date"] = pd.to_datetime(df["date"])
+    df["log_abs_amount"] = np.log1p(df["amount"].abs())
+    df["day_of_week"] = df["date"].dt.dayofweek
+    df["day_of_month"] = df["date"].dt.day
+    df["month"] = df["date"].dt.month
+    df["repeat_count"] = 0
+    df["is_recurring_candidate"] = 0
+    return df
 
 
-def build_model(config, num_classes):
+def build_model(config):
     tfidf = TfidfVectorizer(
-        analyzer='char_wb',
-        ngram_range=(config['tfidf']['ngram_min'], config['tfidf']['ngram_max']),
-        max_features=config['tfidf']['max_features']
+        analyzer=config["tfidf"].get("analyzer", "word"),
+        ngram_range=(config["tfidf"]["ngram_min"], config["tfidf"]["ngram_max"]),
+        max_features=config["tfidf"]["max_features"],
+        lowercase=True,
     )
-    model_type = config['model']['type']
+    model_type = config["model"]["type"]
     if model_type == "baseline_dummy":
         clf = DummyClassifier(strategy="most_frequent")
     elif model_type == "baseline_logreg":
         clf = LogisticRegression(max_iter=2000, C=1.0)
     elif model_type == "xgboost":
         clf = xgb.XGBClassifier(
-            n_estimators=config['model']['n_estimators'],
-            max_depth=config['model']['max_depth'],
-            learning_rate=config['model']['learning_rate'],
-            eval_metric='mlogloss'
+            n_estimators=config["model"]["n_estimators"],
+            max_depth=config["model"]["max_depth"],
+            learning_rate=config["model"]["learning_rate"],
+            eval_metric="mlogloss",
+            tree_method="hist",
+            n_jobs=-1,
         )
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     return tfidf, clf
+
+
+def featurize(tfidf, df, fit=False):
+    text_vec = (
+        tfidf.fit_transform(df[TEXT_COL].astype(str))
+        if fit
+        else tfidf.transform(df[TEXT_COL].astype(str))
+    )
+    num_cols_present = [c for c in NUMERIC_COLS if c in df.columns]
+    if num_cols_present:
+        num_vec = csr_matrix(df[num_cols_present].values.astype(float))
+        return hstack([text_vec, num_vec])
+    return text_vec
+
+
+def evaluate(clf, tfidf, df, le, label):
+    """Run eval on a dataframe; return (macro_f1, weighted_f1, filtered_size, n_classes_seen)."""
+    known_mask = df[LABEL_COL].isin(le.classes_)
+    n_filtered = int((~known_mask).sum())
+    df_eval = df[known_mask].reset_index(drop=True)
+    if len(df_eval) == 0:
+        print(f"[M1] {label}: NO rows with known labels after filtering")
+        return 0.0, 0.0, 0, 0
+    X = featurize(tfidf, df_eval, fit=False)
+    y_true = le.transform(df_eval[LABEL_COL])
+    y_pred = clf.predict(X)
+    macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+    n_classes = len(set(y_true))
+    print(
+        f"[M1] {label}: macro_f1={macro:.4f} weighted_f1={weighted:.4f} "
+        f"n={len(df_eval)} classes={n_classes} filtered={n_filtered}"
+    )
+    return macro, weighted, len(df_eval), n_classes
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='config_m1.yaml')
+    parser.add_argument("--config", default="config_m1.yaml")
     args = parser.parse_args()
     config = load_config(args.config)
 
-    mlflow.set_tracking_uri(config['mlflow_tracking_uri'])
-    mlflow.set_experiment(config['experiment_name'])
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", config.get("mlflow_tracking_uri"))
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(config["experiment_name"])
 
-    df = load_data(config['data_path'])
-    train_df, test_df = split_data(df, pd.to_datetime(config['split_date']))
+    train_path = os.environ.get("M1_TRAIN_PATH", config["train_path"])
+    synth_eval_path = os.environ.get("M1_EVAL_PATH", config["eval_path"])
+    real_eval_path = os.environ.get("M1_REAL_EVAL_PATH", config["real_eval_path"])
+    gate_floor = float(os.environ.get("M1_GATE_FLOOR", config.get("quality_gate_floor", 0.55)))
+    gate_ceiling = float(
+        os.environ.get("M1_GATE_CEILING", config.get("quality_gate_ceiling", 0.98))
+    )
+    registered_model_name = config.get("registered_model_name", "m1-categorization")
+
+    print(f"[M1] tracking_uri={tracking_uri}")
+    print(f"[M1] train_path={train_path}")
+    print(f"[M1] synth_eval_path={synth_eval_path}")
+    print(f"[M1] real_eval_path={real_eval_path}")
+    print(f"[M1] gate floor={gate_floor} ceiling={gate_ceiling}")
+
+    train_df = load_synthetic_split(train_path)
+    synth_eval_df = load_synthetic_split(synth_eval_path)
+    real_eval_df = load_real_eval(real_eval_path)
 
     le = LabelEncoder()
-    y_train = le.fit_transform(train_df['category'])
-    y_test = le.transform(test_df['category'])
-    num_classes = len(le.classes_)
+    y_train = le.fit_transform(train_df[LABEL_COL])
 
-    tfidf, clf = build_model(config, num_classes)
+    tfidf, clf = build_model(config)
+    X_train = featurize(tfidf, train_df, fit=True)
 
-    X_train_text = tfidf.fit_transform(train_df['merchant_clean'])
-    X_test_text = tfidf.transform(test_df['merchant_clean'])
-
-    numeric_cols = ['log_amount', 'day_of_week', 'day_of_month']
-    X_train_num = train_df[numeric_cols].fillna(0).values
-    X_test_num = test_df[numeric_cols].fillna(0).values
-
-    X_train = hstack([X_train_text, csr_matrix(X_train_num)])
-    X_test = hstack([X_test_text, csr_matrix(X_test_num)])
-
-    with mlflow.start_run():
-        mlflow.log_params({
-            "model_type": config['model']['type'],
-            "tfidf_ngram_min": config['tfidf']['ngram_min'],
-            "tfidf_ngram_max": config['tfidf']['ngram_max'],
-            "tfidf_max_features": config['tfidf']['max_features'],
-            "split_date": config['split_date'],
-            "train_size": len(train_df),
-            "test_size": len(test_df),
-        })
-        if config['model']['type'] == 'xgboost':
-            mlflow.log_params({
-                "n_estimators": config['model']['n_estimators'],
-                "max_depth": config['model']['max_depth'],
-                "learning_rate": config['model']['learning_rate'],
-            })
-
-        mlflow.log_param("python_version", platform.python_version())
-        mlflow.log_param("platform", platform.platform())
+    with mlflow.start_run() as run:
+        mlflow.log_params(
+            {
+                "model_type": config["model"]["type"],
+                "tfidf_analyzer": config["tfidf"].get("analyzer", "word"),
+                "tfidf_ngram_min": config["tfidf"]["ngram_min"],
+                "tfidf_ngram_max": config["tfidf"]["ngram_max"],
+                "tfidf_max_features": config["tfidf"]["max_features"],
+                "train_size": len(train_df),
+                "synth_eval_size": len(synth_eval_df),
+                "real_eval_size": len(real_eval_df),
+                "num_classes_trained": len(le.classes_),
+                "train_path": train_path,
+                "synth_eval_path": synth_eval_path,
+                "real_eval_path": real_eval_path,
+                "gate_floor": gate_floor,
+                "gate_ceiling": gate_ceiling,
+                "python_version": platform.python_version(),
+                "platform": platform.platform(),
+            }
+        )
+        if config["model"]["type"] == "xgboost":
+            mlflow.log_params(
+                {
+                    "n_estimators": config["model"]["n_estimators"],
+                    "max_depth": config["model"]["max_depth"],
+                    "learning_rate": config["model"]["learning_rate"],
+                }
+            )
 
         start = time.time()
         clf.fit(X_train, y_train)
         train_time = time.time() - start
         mlflow.log_metric("train_time_seconds", train_time)
 
-        y_pred = clf.predict(X_test)
-        macro_f1 = f1_score(y_test, y_pred, average='macro', zero_division=0)
-        weighted_f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+        # Synthetic eval is informational only.
+        synth_macro, synth_weighted, synth_n, synth_cls = evaluate(
+            clf, tfidf, synth_eval_df, le, "synthetic_eval"
+        )
+        mlflow.log_metric("synth_macro_f1", synth_macro)
+        mlflow.log_metric("synth_weighted_f1", synth_weighted)
+        mlflow.log_metric("synth_eval_n", synth_n)
 
-        mlflow.log_metric("macro_f1", macro_f1)
-        mlflow.log_metric("weighted_f1", weighted_f1)
+        # Real eval is the gated metric.
+        real_macro, real_weighted, real_n, real_cls = evaluate(
+            clf, tfidf, real_eval_df, le, "real_eval"
+        )
+        mlflow.log_metric("real_macro_f1", real_macro)
+        mlflow.log_metric("real_weighted_f1", real_weighted)
+        mlflow.log_metric("real_eval_n", real_n)
+        mlflow.log_metric("real_eval_classes", real_cls)
 
-        present_labels = np.unique(np.concatenate([y_test, y_pred]))
-        present_names = le.inverse_transform(present_labels)
-        report = classification_report(y_test, y_pred,
-                                       labels=present_labels,
-                                       target_names=present_names,
-                                       output_dict=True,
-                                       zero_division=0)
-        for cat, metrics in report.items():
-            if isinstance(metrics, dict):
-                mlflow.log_metric(f"f1_{cat.replace(' ', '_')}", metrics['f1-score'])
+        passed = gate_floor <= real_macro <= gate_ceiling
+        mlflow.set_tag("quality_gate_metric", "real_macro_f1")
+        mlflow.set_tag("quality_gate_passed", str(passed).lower())
+        mlflow.set_tag("quality_gate_floor", str(gate_floor))
+        mlflow.set_tag("quality_gate_ceiling", str(gate_ceiling))
 
-        mlflow.sklearn.log_model(clf, "model", registered_model_name="m1_categorization")
-        print(f"macro_f1={macro_f1:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
+        if passed:
+            mlflow.sklearn.log_model(
+                clf,
+                artifact_path="model",
+                registered_model_name=registered_model_name,
+            )
+            print(
+                f"[M1] PASSED gate ({gate_floor} <= {real_macro:.4f} <= {gate_ceiling}) "
+                f"registered as '{registered_model_name}'"
+            )
+        else:
+            mlflow.set_tag("rejected_by_gate", "true")
+            mlflow.sklearn.log_model(clf, artifact_path="model")
+            if real_macro > gate_ceiling:
+                print(
+                    f"[M1] FAILED gate suspiciously perfect "
+                    f"({real_macro:.4f} > {gate_ceiling}). Possible data leakage. NOT registered."
+                )
+            else:
+                print(f"[M1] FAILED gate below floor ({real_macro:.4f} < {gate_floor}). NOT registered.")
+
+        print(
+            f"[M1] done | synth_macro={synth_macro:.4f} real_macro={real_macro:.4f} "
+            f"train_time={train_time:.1f}s run_id={run.info.run_id}"
+        )
 
 
 if __name__ == "__main__":
