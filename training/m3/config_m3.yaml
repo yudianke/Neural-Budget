@@ -1,0 +1,12 @@
+data_path: "/data/synthetic_transactions.csv"
+mlflow_tracking_uri: "http://129.114.26.4:8000"
+experiment_name: "m3-forecasting"
+
+prophet:
+  changepoint_prior_scale: 0.05
+  seasonality_prior_scale: 10.0
+  seasonality_mode: "additive"
+
+min_months: 12
+min_transactions: 50
+split_months: 2

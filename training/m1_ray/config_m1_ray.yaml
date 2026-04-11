@@ -1,0 +1,21 @@
+data_path: "/data/moneydata.csv"
+mlflow_tracking_uri: "http://129.114.26.4:8000"
+experiment_name: "m1-categorization-ray"
+
+tfidf:
+  ngram_min: 1
+  ngram_max: 3
+  max_features: 1000
+
+model:
+  n_estimators: 200
+  max_depth: 6
+  learning_rate: 0.1
+
+split_date: "2021-01-01"
+checkpoint_dir: "s3://proj16-mlflow-artifacts/ray-checkpoints"
+
+s3:
+  endpoint_url: "https://chi.tacc.chameleoncloud.org:7480"
+  access_key: "0fc136376b7c47528dfd06a09d12ccbd"
+  secret_key: "b52fcbb61618453aacc6ababb530031c"

@@ -1,0 +1,13 @@
+data_path: "/data/moneydata.csv"
+mlflow_tracking_uri: "http://129.114.26.4:8000"
+experiment_name: "m1-categorization"
+
+tfidf:
+  ngram_min: 3
+  ngram_max: 5
+  max_features: 500
+
+model:
+  type: "baseline_logreg"
+
+split_date: "2021-01-01"

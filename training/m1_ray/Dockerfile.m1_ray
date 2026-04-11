@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
+COPY requirements_ray.txt .
+RUN pip install --no-cache-dir -r requirements_ray.txt
+COPY train_m1_ray.py .
+COPY train_m1_ray_ft_demo.py .
+COPY config_m1_ray.yaml .
+ENTRYPOINT ["python"]

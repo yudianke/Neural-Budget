@@ -1,0 +1,11 @@
+data_path: "/data/synthetic_transactions.csv"
+mlflow_tracking_uri: "http://129.114.26.4:8000"
+experiment_name: "m2-anomaly-detection"
+
+isolation_forest:
+  contamination: 0.10
+  n_estimators: 200
+  random_state: 42
+
+min_transactions: 50
+split_date: "2024-10-01"

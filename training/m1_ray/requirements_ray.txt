@@ -1,0 +1,9 @@
+pandas
+scikit-learn
+xgboost
+mlflow
+pyyaml
+scipy
+ray[train]==2.35.0
+boto3
+pyarrow

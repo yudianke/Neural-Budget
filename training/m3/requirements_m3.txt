@@ -1,0 +1,6 @@
+pandas
+numpy
+mlflow
+pyyaml
+prophet
+scipy
