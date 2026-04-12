@@ -4,6 +4,7 @@ registered_model_name: m2-anomaly
 
 train_path: swift://neural-budget-data-proj16/processed/anomaly_train.csv
 eval_path: swift://neural-budget-data-proj16/processed/anomaly_eval.csv
+production_path: swift://neural-budget-data-proj16/processed/anomaly_eval.csv
 
 quality_gate_recall: 0.70
 anomaly_sigma: 5.0

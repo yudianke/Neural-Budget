@@ -4,5 +4,6 @@ registered_model_name: m3-forecast-base
 
 train_path: swift://neural-budget-data-proj16/processed/forecasting_train.csv
 eval_path: swift://neural-budget-data-proj16/processed/forecasting_eval.csv
+production_path: swift://neural-budget-data-proj16/processed/forecasting_eval.csv
 
 quality_gate_median_mae: 1000.0

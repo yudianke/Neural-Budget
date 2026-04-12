@@ -4,6 +4,7 @@ registered_model_name: m1-categorization
 
 train_path: swift://neural-budget-data-proj16/processed/categorization_train.csv
 eval_path: swift://neural-budget-data-proj16/processed/categorization_eval.csv
+production_path: swift://neural-budget-data-proj16/processed/categorization_eval.csv
 real_eval_path: swift://neural-budget-data-proj16/processed/moneydata_labeled.csv
 
 quality_gate_floor: 0.55
