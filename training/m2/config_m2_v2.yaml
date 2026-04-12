@@ -1,6 +1,12 @@
-data_path: "/data/synthetic_transactions.csv"
-mlflow_tracking_uri: "http://129.114.25.172:8000"
-experiment_name: "m2-anomaly-detection"
+mlflow_tracking_uri: http://129.114.25.172:8000
+experiment_name: m2-anomaly-detection
+registered_model_name: m2-anomaly
+
+train_path: swift://neural-budget-data-proj16/processed/anomaly_train.csv
+eval_path: swift://neural-budget-data-proj16/processed/anomaly_eval.csv
+
+quality_gate_recall: 0.70
+anomaly_sigma: 5.0
 
 isolation_forest:
   contamination: 0.02
@@ -8,4 +14,3 @@ isolation_forest:
   random_state: 42
 
 min_transactions: 50
-split_date: "2024-10-01"
