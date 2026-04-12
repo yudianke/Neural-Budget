@@ -1,0 +1,267 @@
+import React, { memo, useCallback, useMemo } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+
+import { SvgArrowsSynchronize } from '@actual-app/components/icons/v2';
+import { theme } from '@actual-app/components/theme';
+import * as monthUtils from '@actual-app/core/shared/months';
+import type { TransactionEntity } from '@actual-app/core/types/models';
+import {
+  format as formatDate,
+  isValid as isDateValid,
+  parseISO,
+} from 'date-fns';
+
+import { FinancialText } from '#components/FinancialText';
+import { Cell, Field, Row, SelectCell, Table } from '#components/table';
+import { DisplayId } from '#components/util/DisplayId';
+import { useAccount } from '#hooks/useAccount';
+import { useCategory } from '#hooks/useCategory';
+import { useDateFormat } from '#hooks/useDateFormat';
+import { useFormat } from '#hooks/useFormat';
+import type { FormatType } from '#hooks/useFormat';
+import { useSelectedDispatch, useSelectedItems } from '#hooks/useSelected';
+
+function serializeTransaction(
+  transaction: TransactionEntity,
+  dateFormat: string,
+): TransactionEntity {
+  let { date } = transaction;
+
+  if (!isDateValid(parseISO(date))) {
+    date = monthUtils.currentDay();
+  }
+
+  return {
+    ...transaction,
+    date: formatDate(parseISO(date), dateFormat),
+  };
+}
+
+type TransactionRowProps = {
+  transaction: TransactionEntity;
+  fields: string[];
+  selected: boolean;
+  format: (value: unknown, type: FormatType) => string;
+};
+
+const TransactionRow = memo(function TransactionRow({
+  transaction,
+  fields,
+  selected,
+  format,
+}: TransactionRowProps) {
+  const { t } = useTranslation();
+
+  const { data: category } = useCategory(transaction.category);
+  const account = useAccount(transaction.account);
+
+  const dispatchSelected = useSelectedDispatch();
+
+  return (
+    <Row style={{ color: theme.tableText }}>
+      <SelectCell
+        exposed
+        focused={false}
+        onSelect={e => {
+          dispatchSelected({
+            type: 'select',
+            id: transaction.id,
+            isRangeSelect: e.shiftKey,
+          });
+        }}
+        selected={selected}
+      />
+      {fields.map((field, i) => {
+        switch (field) {
+          case 'date':
+            return (
+              <Field key={i} width={100}>
+                {transaction.date}
+              </Field>
+            );
+          case 'imported_payee':
+            return (
+              <Field key={i} width="flex" title={transaction.imported_payee}>
+                {transaction.imported_payee}
+              </Field>
+            );
+          case 'payee':
+            return (
+              <Cell
+                key={i}
+                width="flex"
+                exposed
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'flex-start',
+                }}
+              >
+                {() => (
+                  <>
+                    {transaction.schedule && (
+                      <SvgArrowsSynchronize
+                        style={{
+                          width: 13,
+                          height: 13,
+                          margin: '0 5px',
+                        }}
+                      />
+                    )}
+                    {transaction.payee && (
+                      <DisplayId type="payees" id={transaction.payee} />
+                    )}
+                  </>
+                )}
+              </Cell>
+            );
+          case 'category':
+            return (
+              <Field key={i} width="flex" title={category?.name}>
+                {category?.name || ''}
+              </Field>
+            );
+          case 'account':
+            return (
+              <Field
+                key={i}
+                width="flex"
+                title={account?.name || t('No account')}
+              >
+                {account?.name || t('No account')}
+              </Field>
+            );
+          case 'notes':
+            return (
+              <Field key={i} width="flex" title={transaction.notes}>
+                {transaction.notes}
+              </Field>
+            );
+          case 'amount':
+            return (
+              <Field key={i} width={75} style={{ textAlign: 'right' }}>
+                <FinancialText>
+                  {format(transaction.amount, 'financial')}
+                </FinancialText>
+              </Field>
+            );
+          default:
+            return null;
+        }
+      })}
+    </Row>
+  );
+});
+
+type SimpleTransactionsTableProps = {
+  transactions: readonly TransactionEntity[];
+  renderEmpty: ReactNode;
+  fields?: string[];
+  style?: CSSProperties;
+};
+
+export function SimpleTransactionsTable({
+  transactions,
+  renderEmpty,
+  fields = ['date', 'payee', 'amount'],
+  style,
+}: SimpleTransactionsTableProps) {
+  const format = useFormat();
+  const dateFormat = useDateFormat() || 'MM/dd/yyyy';
+  const selectedItems = useSelectedItems();
+  const dispatchSelected = useSelectedDispatch();
+  const memoFields = useMemo(() => fields, [fields]);
+
+  const serializedTransactions = useMemo(() => {
+    return transactions.map(trans => serializeTransaction(trans, dateFormat));
+  }, [transactions, dateFormat]);
+
+  const renderItem = useCallback(
+    ({ item }: { item: TransactionEntity }) => {
+      return (
+        <TransactionRow
+          transaction={item}
+          fields={memoFields}
+          selected={selectedItems && selectedItems.has(item.id)}
+          format={format}
+        />
+      );
+    },
+    [memoFields, selectedItems, format],
+  );
+
+  return (
+    <Table
+      style={style}
+      backgroundColor={theme.tableBackground}
+      items={serializedTransactions}
+      renderEmpty={renderEmpty}
+      headers={
+        <>
+          <SelectCell
+            exposed
+            focused={false}
+            selected={selectedItems.size > 0}
+            width={20}
+            onSelect={e =>
+              dispatchSelected({
+                type: 'select-all',
+                isRangeSelect: e.shiftKey,
+              })
+            }
+          />
+          {fields.map((field, i) => {
+            switch (field) {
+              case 'date':
+                return (
+                  <Field key={i} width={100}>
+                    <Trans>Date</Trans>
+                  </Field>
+                );
+              case 'imported_payee':
+                return (
+                  <Field key={i} width="flex">
+                    <Trans>Imported payee</Trans>
+                  </Field>
+                );
+              case 'payee':
+                return (
+                  <Field key={i} width="flex">
+                    <Trans>Payee</Trans>
+                  </Field>
+                );
+              case 'category':
+                return (
+                  <Field key={i} width="flex">
+                    <Trans>Category</Trans>
+                  </Field>
+                );
+              case 'account':
+                return (
+                  <Field key={i} width="flex">
+                    <Trans>Account</Trans>
+                  </Field>
+                );
+              case 'notes':
+                return (
+                  <Field key={i} width="flex">
+                    <Trans>Notes</Trans>
+                  </Field>
+                );
+              case 'amount':
+                return (
+                  <Field key={i} width={75} style={{ textAlign: 'right' }}>
+                    <Trans>Amount</Trans>
+                  </Field>
+                );
+              default:
+                return null;
+            }
+          })}
+        </>
+      }
+      renderItem={renderItem}
+    />
+  );
+}

@@ -1,0 +1,411 @@
+import { generateAccount } from '@actual-app/core/mocks';
+import type {
+  AccountEntity,
+  NearbyPayeeEntity,
+  PayeeEntity,
+} from '@actual-app/core/types/models';
+import type { UseQueryResult } from '@tanstack/react-query';
+import { render, screen } from '@testing-library/react';
+import type { Screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { vi } from 'vitest';
+
+import { AuthProvider } from '#auth/AuthProvider';
+import { useNearbyPayees } from '#hooks/useNearbyPayees';
+import { createTestQueryClient, TestProviders } from '#mocks';
+import { payeeQueries } from '#payees';
+
+import { PayeeAutocomplete } from './PayeeAutocomplete';
+import type { PayeeAutocompleteProps } from './PayeeAutocomplete';
+
+const PAYEE_SELECTOR = '[data-testid][role=option]';
+const PAYEE_SECTION_SELECTOR = '[data-testid$="-item-group"]';
+const ALL_PAYEE_ITEMS_SELECTOR = '[data-testid$="-payee-item"]';
+
+const payees = [
+  makePayee('Bob', { favorite: true }),
+  makePayee('Alice', { favorite: true }),
+  makePayee('This guy on the side of the road'),
+];
+
+const accounts: AccountEntity[] = [
+  generateAccount('Bank of Montreal', false, false),
+];
+const defaultProps = {
+  value: null,
+  embedded: true,
+  payees,
+  accounts,
+};
+
+function makePayee(name: string, options?: { favorite: boolean }): PayeeEntity {
+  return {
+    id: name.toLowerCase() + '-id',
+    name,
+    favorite: options?.favorite ? true : false,
+    transfer_acct: undefined,
+  };
+}
+
+function makeNearbyPayee(name: string, distance: number): NearbyPayeeEntity {
+  const id = name.toLowerCase() + '-id';
+  return {
+    payee: {
+      id,
+      name,
+      favorite: false,
+      transfer_acct: undefined,
+    },
+    location: {
+      id: id + '-loc',
+      payee_id: id,
+      latitude: 0,
+      longitude: 0,
+      created_at: 0,
+      distance,
+    },
+  };
+}
+
+function extractPayeesAndHeaderNames(
+  screen: Screen,
+  itemSelector: string = PAYEE_SELECTOR,
+) {
+  const autocompleteElement = screen.getByTestId('autocomplete');
+
+  // Get all elements that match either selector, but query them separately
+  // and then sort by their position in the DOM to maintain document order
+  const headers = [
+    ...autocompleteElement.querySelectorAll(PAYEE_SECTION_SELECTOR),
+  ];
+  const items = [...autocompleteElement.querySelectorAll(itemSelector)];
+
+  // Combine all elements and sort by their position in the DOM
+  const allElements = [...headers, ...items];
+  allElements.sort((a, b) => {
+    // Compare document position to maintain DOM order
+    return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING
+      ? -1
+      : 1;
+  });
+
+  return allElements
+    .map(e => e.getAttribute('data-testid'))
+    .map(firstOrIncorrect);
+}
+
+// Not good, see `Autocomplete.js` for details
+function waitForAutocomplete() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+async function clickAutocomplete(autocomplete: HTMLElement) {
+  const input = autocomplete.querySelector(`input`);
+  if (input != null) {
+    await userEvent.click(input);
+  }
+  await waitForAutocomplete();
+}
+
+vi.mock('#hooks/useNearbyPayees', () => ({
+  useNearbyPayees: vi.fn(),
+}));
+
+function firstOrIncorrect(id: string | null): string {
+  return id?.split('-', 1)[0] || 'incorrect';
+}
+
+function mockNearbyPayeesResult(
+  data: NearbyPayeeEntity[],
+): UseQueryResult<NearbyPayeeEntity[], Error> {
+  return {
+    data,
+    dataUpdatedAt: 0,
+    error: null,
+    errorUpdatedAt: 0,
+    errorUpdateCount: 0,
+    failureCount: 0,
+    failureReason: null,
+    fetchStatus: 'idle',
+    isError: false,
+    isFetched: true,
+    isFetchedAfterMount: true,
+    isFetching: false,
+    isInitialLoading: false,
+    isLoading: false,
+    isLoadingError: false,
+    isPaused: false,
+    isPending: false,
+    isPlaceholderData: false,
+    isRefetchError: false,
+    isRefetching: false,
+    isStale: false,
+    isSuccess: true,
+    isEnabled: true,
+    promise: Promise.resolve(data),
+    refetch: vi.fn(),
+    status: 'success',
+  };
+}
+
+describe('PayeeAutocomplete.getPayeeSuggestions', () => {
+  const queryClient = createTestQueryClient();
+
+  beforeEach(() => {
+    vi.mocked(useNearbyPayees).mockReturnValue(mockNearbyPayeesResult([]));
+    queryClient.setQueryData(payeeQueries.listCommon().queryKey, []);
+  });
+
+  function renderPayeeAutocomplete(
+    props?: Partial<PayeeAutocompleteProps>,
+  ): HTMLElement {
+    const autocompleteProps = {
+      ...defaultProps,
+      ...props,
+    };
+
+    render(
+      <TestProviders queryClient={queryClient}>
+        <AuthProvider>
+          <div data-testid="autocomplete-test">
+            <PayeeAutocomplete
+              {...autocompleteProps}
+              onSelect={vi.fn()}
+              type="single"
+              value={null}
+              embedded={false}
+            />
+          </div>
+        </AuthProvider>
+      </TestProviders>,
+    );
+    return screen.getByTestId('autocomplete-test');
+  }
+
+  test('favorites get sorted alphabetically', async () => {
+    const autocomplete = renderPayeeAutocomplete();
+    await clickAutocomplete(autocomplete);
+
+    expect(
+      [
+        ...screen.getByTestId('autocomplete').querySelectorAll(PAYEE_SELECTOR),
+      ].map(e => e.getAttribute('data-testid')),
+    ).toStrictEqual([
+      'Alice-payee-item',
+      'Bob-payee-item',
+      'This guy on the side of the road-payee-item',
+    ]);
+  });
+
+  test('list with less than the maximum favorites adds common payees', async () => {
+    //Note that the payees list assumes the payees are already sorted
+    const payees: PayeeEntity[] = [
+      makePayee('Alice'),
+      makePayee('Bob'),
+      makePayee('Eve', { favorite: true }),
+      makePayee('Bruce'),
+      makePayee('Carol'),
+      makePayee('Natasha'),
+      makePayee('Steve'),
+      makePayee('Tony'),
+    ];
+    queryClient.setQueryData(payeeQueries.listCommon().queryKey, [
+      makePayee('Bruce'),
+      makePayee('Natasha'),
+      makePayee('Steve'),
+      makePayee('Tony'),
+      makePayee('Carol'),
+    ]);
+    const expectedPayeeOrder = [
+      'Suggested Payees',
+      'Eve',
+      'Bruce',
+      'Natasha',
+      'Steve',
+      'Tony',
+      'Payees',
+      'Alice',
+      'Bob',
+      'Carol',
+    ];
+    await clickAutocomplete(renderPayeeAutocomplete({ payees }));
+
+    expect(extractPayeesAndHeaderNames(screen)).toStrictEqual(
+      expectedPayeeOrder,
+    );
+  });
+
+  test('list with more than the maximum favorites only lists favorites', async () => {
+    //Note that the payees list assumes the payees are already sorted
+    const payees = [
+      makePayee('Alice', { favorite: true }),
+      makePayee('Bob', { favorite: true }),
+      makePayee('Eve', { favorite: true }),
+      makePayee('Bruce', { favorite: true }),
+      makePayee('Carol', { favorite: true }),
+      makePayee('Natasha'),
+      makePayee('Steve'),
+      makePayee('Tony', { favorite: true }),
+    ];
+    queryClient.setQueryData(payeeQueries.listCommon().queryKey, [
+      makePayee('Bruce'),
+      makePayee('Natasha'),
+      makePayee('Steve'),
+      makePayee('Tony'),
+      makePayee('Carol'),
+    ]);
+    const expectedPayeeOrder = [
+      'Suggested Payees',
+      'Alice',
+      'Bob',
+      'Bruce',
+      'Carol',
+      'Eve',
+      'Tony',
+      'Payees',
+      'Natasha',
+      'Steve',
+    ];
+    const autocomplete = renderPayeeAutocomplete({ payees });
+    await clickAutocomplete(autocomplete);
+
+    expect(extractPayeesAndHeaderNames(screen)).toStrictEqual(
+      expectedPayeeOrder,
+    );
+  });
+
+  test('nearby payees appear in their own section before other payees', async () => {
+    const nearbyPayees = [
+      makeNearbyPayee('Coffee Shop', 0.3),
+      makeNearbyPayee('Grocery Store', 1.2),
+    ];
+    const payees = [makePayee('Alice'), makePayee('Bob')];
+    vi.mocked(useNearbyPayees).mockReturnValue(
+      mockNearbyPayeesResult(nearbyPayees),
+    );
+
+    await clickAutocomplete(renderPayeeAutocomplete({ payees }));
+
+    expect(
+      extractPayeesAndHeaderNames(screen, ALL_PAYEE_ITEMS_SELECTOR),
+    ).toStrictEqual([
+      'Nearby Payees',
+      'Coffee Shop',
+      'Grocery Store',
+      'Payees',
+      'Alice',
+      'Bob',
+    ]);
+  });
+
+  test('nearby payees are filtered by search input', async () => {
+    const nearbyPayees = [
+      makeNearbyPayee('Coffee Shop', 0.3),
+      makeNearbyPayee('Grocery Store', 1.2),
+    ];
+    const payees = [makePayee('Alice'), makePayee('Bob')];
+    vi.mocked(useNearbyPayees).mockReturnValue(
+      mockNearbyPayeesResult(nearbyPayees),
+    );
+
+    const autocomplete = renderPayeeAutocomplete({ payees });
+    await clickAutocomplete(autocomplete);
+
+    const input = autocomplete.querySelector('input')!;
+    await userEvent.type(input, 'Coffee');
+    await waitForAutocomplete();
+
+    const names = extractPayeesAndHeaderNames(screen, ALL_PAYEE_ITEMS_SELECTOR);
+    expect(names).toContain('Nearby Payees');
+    expect(names).toContain('Coffee Shop');
+    expect(names).not.toContain('Grocery Store');
+    expect(names).not.toContain('Alice');
+    expect(names).not.toContain('Bob');
+  });
+
+  test('nearby payees coexist with favorites and common payees', async () => {
+    const nearbyPayees = [makeNearbyPayee('Coffee Shop', 0.3)];
+    const payees = [
+      makePayee('Alice'),
+      makePayee('Bob'),
+      makePayee('Eve', { favorite: true }),
+      makePayee('Carol'),
+    ];
+    vi.mocked(useNearbyPayees).mockReturnValue(
+      mockNearbyPayeesResult(nearbyPayees),
+    );
+    queryClient.setQueryData(payeeQueries.listCommon().queryKey, [
+      makePayee('Bob'),
+      makePayee('Carol'),
+    ]);
+
+    await clickAutocomplete(renderPayeeAutocomplete({ payees }));
+
+    expect(
+      extractPayeesAndHeaderNames(screen, ALL_PAYEE_ITEMS_SELECTOR),
+    ).toStrictEqual([
+      'Nearby Payees',
+      'Coffee Shop',
+      'Suggested Payees',
+      'Eve',
+      'Bob',
+      'Carol',
+      'Payees',
+      'Alice',
+    ]);
+  });
+
+  test('a payee appearing in both nearby and favorites shows in both sections', async () => {
+    const nearbyPayees = [makeNearbyPayee('Eve', 0.5)];
+    const payees = [makePayee('Alice'), makePayee('Eve', { favorite: true })];
+    vi.mocked(useNearbyPayees).mockReturnValue(
+      mockNearbyPayeesResult(nearbyPayees),
+    );
+
+    await clickAutocomplete(renderPayeeAutocomplete({ payees }));
+
+    expect(
+      extractPayeesAndHeaderNames(screen, ALL_PAYEE_ITEMS_SELECTOR),
+    ).toStrictEqual([
+      'Nearby Payees',
+      'Eve',
+      'Suggested Payees',
+      'Eve',
+      'Payees',
+      'Alice',
+    ]);
+  });
+
+  test('list with no favorites shows just the payees list', async () => {
+    //Note that the payees list assumes the payees are already sorted
+    const payees = [
+      makePayee('Alice'),
+      makePayee('Bob'),
+      makePayee('Eve'),
+      makePayee('Natasha'),
+      makePayee('Steve'),
+    ];
+    const expectedPayeeOrder = ['Alice', 'Bob', 'Eve', 'Natasha', 'Steve'];
+    const autocomplete = renderPayeeAutocomplete({ payees });
+    await clickAutocomplete(autocomplete);
+
+    expect(
+      [
+        ...screen
+          .getByTestId('autocomplete')
+          .querySelectorAll('[data-testid][role=option]'),
+      ]
+        .map(e => e.getAttribute('data-testid'))
+        .flatMap(firstOrIncorrect),
+    ).toStrictEqual(expectedPayeeOrder);
+    expect(
+      [
+        ...screen
+          .getByTestId('autocomplete')
+          .querySelectorAll('[data-testid$="-item-group"]'),
+      ]
+        .map(e => e.getAttribute('data-testid'))
+        .flatMap(firstOrIncorrect),
+    ).toStrictEqual(['Payees']);
+  });
+});

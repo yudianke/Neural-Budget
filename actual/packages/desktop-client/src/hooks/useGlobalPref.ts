@@ -1,0 +1,35 @@
+import { useCallback } from 'react';
+
+import type { GlobalPrefs } from '@actual-app/core/types/prefs';
+
+import { saveGlobalPrefs } from '#prefs/prefsSlice';
+import { useDispatch, useSelector } from '#redux';
+
+type SetGlobalPrefAction<K extends keyof GlobalPrefs> = (
+  value: GlobalPrefs[K],
+) => void;
+
+export function useGlobalPref<K extends keyof GlobalPrefs>(
+  prefName: K,
+  onSaveGlobalPrefs?: () => void,
+): [GlobalPrefs[K], SetGlobalPrefAction<K>] {
+  const dispatch = useDispatch();
+  const setGlobalPref = useCallback<SetGlobalPrefAction<K>>(
+    value => {
+      void dispatch(
+        saveGlobalPrefs({
+          prefs: {
+            [prefName]: value,
+          },
+          onSaveGlobalPrefs,
+        }),
+      );
+    },
+    [prefName, dispatch, onSaveGlobalPrefs],
+  );
+  const globalPref = useSelector(
+    state => state.prefs.global?.[prefName] as GlobalPrefs[K],
+  );
+
+  return [globalPref, setGlobalPref];
+}

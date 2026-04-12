@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "trailingComma": "all",
+  "arrowParens": "avoid",
+  "printWidth": 80,
+  "experimentalSortImports": {
+    "groups": [
+      "react",
+      "builtin",
+      "external",
+      ["parent", "subpath"],
+      "sibling",
+      "index"
+    ],
+    "customGroups": [
+      {
+        "groupName": "react",
+        "elementNamePattern": ["react", "react-dom/*", "react-*"]
+      }
+    ],
+    "newlinesBetween": true
+  }
+}

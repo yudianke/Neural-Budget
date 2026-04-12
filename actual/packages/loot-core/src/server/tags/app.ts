@@ -1,0 +1,101 @@
+import { createApp } from '#server/app';
+import * as db from '#server/db';
+import { mutator } from '#server/mutators';
+import { batchMessages } from '#server/sync';
+import { undoable } from '#server/undo';
+import type { TagEntity } from '#types/models';
+
+export type TagsHandlers = {
+  'tags-get': typeof getTags;
+  'tags-create': typeof createTag;
+  'tags-delete': typeof deleteTag;
+  'tags-delete-all': typeof deleteAllTags;
+  'tags-update': typeof updateTag;
+  'tags-discover': typeof discoverTags;
+};
+
+export const app = createApp<TagsHandlers>();
+app.method('tags-get', getTags);
+app.method('tags-create', mutator(undoable(createTag)));
+app.method('tags-delete', mutator(undoable(deleteTag)));
+app.method('tags-delete-all', mutator(deleteAllTags));
+app.method('tags-update', mutator(undoable(updateTag)));
+app.method('tags-discover', mutator(discoverTags));
+
+async function getTags(): Promise<TagEntity[]> {
+  return await db.getTags();
+}
+
+async function createTag({
+  tag,
+  color = null,
+  description = null,
+}: Omit<TagEntity, 'id'>): Promise<TagEntity> {
+  const allTags = await db.getAllTags();
+
+  const { id: tagId = null } = allTags.find(t => t.tag === tag) || {};
+  if (tagId) {
+    await db.updateTag({
+      id: tagId,
+      tag,
+      color,
+      description,
+      tombstone: 0,
+    });
+    return { id: tagId, tag, color, description };
+  }
+
+  const id = await db.insertTag({
+    tag: tag.trim(),
+    color: color ? color.trim() : null,
+    description,
+  });
+
+  return { id, tag, color, description };
+}
+
+async function deleteTag(tag: Pick<TagEntity, 'id'>): Promise<TagEntity['id']> {
+  await db.deleteTag(tag);
+  return tag.id;
+}
+
+async function deleteAllTags(
+  ids: Array<TagEntity['id']>,
+): Promise<Array<TagEntity['id']>> {
+  await batchMessages(async () => {
+    for (const id of ids) {
+      await db.deleteTag({ id });
+    }
+  });
+  return ids;
+}
+
+async function updateTag(
+  tag: Partial<TagEntity> & Pick<TagEntity, 'id'>,
+): Promise<Partial<TagEntity>> {
+  await db.updateTag(tag);
+  return tag;
+}
+
+async function discoverTags(): Promise<TagEntity[]> {
+  const taggedNotes = await db.findTags();
+
+  const tags = await getTags();
+  for (const { notes } of taggedNotes) {
+    for (const [_, tag] of notes.matchAll(/(?<!#)#([^#\s]+)/g)) {
+      if (!tags.find(t => t.tag === tag)) {
+        tags.push(await createTag({ tag }));
+      }
+    }
+  }
+
+  return tags.sort(function (a, b) {
+    if (a.tag < b.tag) {
+      return -1;
+    }
+    if (a.tag > b.tag) {
+      return 1;
+    }
+    return 0;
+  });
+}

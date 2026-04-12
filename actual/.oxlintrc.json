@@ -1,0 +1,429 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "import", "jsx-a11y"],
+  "jsPlugins": [
+    "./packages/eslint-plugin-actual/lib/index.js",
+    "eslint-plugin-typescript-paths",
+    "eslint-plugin-perfectionist"
+  ],
+  "env": {
+    "browser": true,
+    "node": true,
+    "vitest": true
+  },
+  "globals": {
+    "vi": "readonly",
+    "backend": "readonly",
+    "importScripts": "readonly",
+    "FS": "readonly"
+  },
+  "rules": {
+    // Import sorting
+    "perfectionist/sort-named-imports": [
+      "error",
+      {
+        "groups": ["value-import", "type-import"]
+      }
+    ],
+
+    // Actual rules
+    "actual/typography": "error",
+    "actual/no-untranslated-strings": "error",
+    "actual/prefer-trans-over-t": "error",
+    "actual/prefer-if-statement": "error",
+    "actual/prefer-logger-over-console": "error",
+    "actual/object-shorthand-properties": "error",
+    "actual/prefer-const": "error",
+    "actual/no-anchor-tag": "error",
+    "actual/no-react-default-import": "error",
+    "actual/prefer-subpath-imports": "error",
+
+    // JSX A11y rules
+    "jsx-a11y/no-autofocus": [
+      "error",
+      {
+        "ignoreNonDOM": true
+      }
+    ],
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-has-content": "error",
+    "jsx-a11y/anchor-is-valid": [
+      "error",
+      {
+        "aspects": ["noHref", "invalidHref"]
+      }
+    ],
+    "jsx-a11y/aria-activedescendant-has-tabindex": "error",
+    "jsx-a11y/aria-props": "error",
+    "jsx-a11y/aria-proptypes": "error",
+    "jsx-a11y/aria-role": [
+      "error",
+      {
+        "ignoreNonDOM": true
+      }
+    ],
+    "jsx-a11y/aria-unsupported-elements": "error",
+    "jsx-a11y/heading-has-content": "error",
+    "jsx-a11y/iframe-has-title": "error",
+    "jsx-a11y/img-redundant-alt": "error",
+    "jsx-a11y/no-access-key": "error",
+    "jsx-a11y/no-distracting-elements": "error",
+    "jsx-a11y/no-redundant-roles": "error",
+    "jsx-a11y/role-has-required-aria-props": "error",
+    "jsx-a11y/role-supports-aria-props": "error",
+    "jsx-a11y/scope": "error",
+
+    // Typescript rules
+    "typescript/ban-ts-comment": ["error"],
+    "typescript/consistent-type-definitions": ["error", "type"],
+    "typescript/consistent-type-imports": [
+      "error",
+      {
+        "prefer": "type-imports",
+        "fixStyle": "inline-type-imports"
+      }
+    ],
+    "typescript/no-implied-eval": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-restricted-types": [
+      "error",
+      {
+        "types": {
+          // forbid FC as superfluous
+          "FunctionComponent": {
+            "message": "Type the props argument and let TS infer or use ComponentType for a component prop"
+          },
+          "FC": {
+            "message": "Type the props argument and let TS infer or use ComponentType for a component prop"
+          }
+        }
+      }
+    ],
+    "typescript/no-var-requires": "error",
+    // we want to allow unions such as "{ name: DbAccount['name'] | DbPayee['name'] }"
+    "typescript/no-duplicate-type-constituents": "off",
+    // we want to allow unions such as "string | 'network' | 'file-key-mismatch'"
+    "typescript/no-redundant-type-constituents": "off",
+    "typescript/await-thenable": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/require-array-sort-compare": "error",
+    "typescript/unbound-method": "error",
+    "typescript/no-for-in-array": "error",
+    "typescript/restrict-template-expressions": "error",
+    "typescript/no-misused-spread": "warn", // TODO: enable this
+    "typescript/no-base-to-string": "warn", // TODO: enable this
+    "typescript/no-unsafe-unary-minus": "warn", // TODO: enable this
+    "typescript/no-unsafe-type-assertion": "warn", // TODO: enable this
+
+    // Import rules
+    "import/consistent-type-specifier-style": "error",
+    "import/first": "error",
+    "import/no-amd": "error",
+    "import/no-default-export": "error",
+    "import/no-webpack-loader-syntax": "error",
+    "import/no-useless-path-segments": "error",
+    "import/no-unresolved": "error",
+    "import/no-unused-modules": "error",
+    "import/no-duplicates": [
+      "error",
+      {
+        "prefer-inline": false
+      }
+    ],
+
+    // React rules
+    "react/exhaustive-deps": [
+      "error",
+      {
+        "additionalHooks": "(^useQuery$|^useEffectAfterMount$)"
+      }
+    ],
+    "react/jsx-curly-brace-presence": "error",
+    "react/jsx-filename-extension": [
+      "error",
+      {
+        "extensions": [".jsx", ".tsx"],
+        "allow": "as-needed"
+      }
+    ],
+    "react/jsx-no-comment-textnodes": "error",
+    "react/jsx-no-duplicate-props": "error",
+    "react/jsx-no-target-blank": "error",
+    "react/jsx-no-undef": "error",
+    "react/jsx-no-useless-fragment": "error",
+    "react/jsx-pascal-case": [
+      "error",
+      {
+        "allowAllCaps": true,
+        "ignore": []
+      }
+    ],
+    "react/no-danger-with-children": "error",
+    "react/no-direct-mutation-state": "error",
+    "react/no-is-mounted": "error",
+    "react/no-unstable-nested-components": "error",
+    "react/require-render-return": "error",
+    "react/rules-of-hooks": "error",
+    "react/self-closing-comp": "error",
+    "react/style-prop-object": "error",
+    "react/jsx-boolean-value": "error",
+
+    // ESLint rules
+    "eslint/array-callback-return": "error",
+    "eslint/curly": ["error", "multi-line", "consistent"],
+    "eslint/default-case": [
+      "error",
+      {
+        "commentPattern": "^no default$"
+      }
+    ],
+    "eslint/eqeqeq": ["error", "smart"],
+    "eslint/no-array-constructor": "error",
+    "eslint/no-caller": "error",
+    "eslint/no-cond-assign": ["error", "except-parens"],
+    "eslint/no-const-assign": "error",
+    "eslint/no-control-regex": "error",
+    "eslint/no-delete-var": "error",
+    "eslint/no-dupe-class-members": "error",
+    "eslint/no-dupe-keys": "error",
+    "eslint/no-duplicate-case": "error",
+    "eslint/no-empty-character-class": "error",
+    "eslint/no-empty-function": "error",
+    "eslint/no-empty-pattern": "error",
+    "eslint/no-eval": "error",
+    "eslint/no-ex-assign": "error",
+    "eslint/no-extend-native": "error",
+    "eslint/no-extra-bind": "error",
+    "eslint/no-extra-label": "error",
+    "eslint/no-fallthrough": "error",
+    "eslint/no-func-assign": "error",
+    "eslint/no-invalid-regexp": "error",
+    "eslint/no-iterator": "error",
+    "eslint/no-label-var": "error",
+    "eslint/no-var": "error",
+    "eslint/no-labels": [
+      "error",
+      {
+        "allowLoop": true,
+        "allowSwitch": false
+      }
+    ],
+    "eslint/no-new-func": "error",
+    "eslint/no-script-url": "error",
+    "eslint/no-self-assign": "error",
+    "eslint/no-self-compare": "error",
+    "eslint/no-sequences": "error",
+    "eslint/no-shadow-restricted-names": "error",
+    "eslint/no-sparse-arrays": "error",
+    "eslint/no-template-curly-in-string": "error",
+    "eslint/no-this-before-super": "error",
+    "eslint/no-throw-literal": "error",
+    "eslint/no-unreachable": "error",
+    "eslint/no-obj-calls": "error",
+    "eslint/no-new-wrappers": "error",
+    "eslint/no-unsafe-negation": "error",
+    "eslint/no-multi-str": "error",
+    "eslint/no-global-assign": "error",
+    "eslint/no-lone-blocks": "error",
+    "eslint/no-unused-labels": "error",
+    "eslint/no-object-constructor": "error",
+    "eslint/no-new-native-nonconstructor": "error",
+    "eslint/no-redeclare": "error",
+    "eslint/no-useless-computed-key": "error",
+    "eslint/no-useless-concat": "error",
+    "eslint/no-useless-escape": "error",
+    "eslint/require-yield": "error",
+    "eslint/getter-return": "error",
+    "eslint/unicode-bom": ["error", "never"],
+    "eslint/no-use-isnan": "error",
+    "eslint/valid-typeof": "error",
+    "eslint/no-useless-rename": [
+      "error",
+      {
+        "ignoreDestructuring": false,
+        "ignoreImport": false,
+        "ignoreExport": false
+      }
+    ],
+    "eslint/no-with": "error",
+    "eslint/no-regex-spaces": "error",
+    "eslint/no-restricted-globals": [
+      "error",
+
+      // https://github.com/facebook/create-react-app/tree/main/packages/confusing-browser-globals
+      "addEventListener",
+      "blur",
+      "close",
+      "closed",
+      "confirm",
+      "defaultStatus",
+      "defaultstatus",
+      "event",
+      "external",
+      "find",
+      "focus",
+      "frameElement",
+      "frames",
+      "history",
+      "innerHeight",
+      "innerWidth",
+      "length",
+      "location",
+      "locationbar",
+      "menubar",
+      "moveBy",
+      "moveTo",
+      "name",
+      "onblur",
+      "onerror",
+      "onfocus",
+      "onload",
+      "onresize",
+      "onunload",
+      "open",
+      "opener",
+      "opera",
+      "outerHeight",
+      "outerWidth",
+      "pageXOffset",
+      "pageYOffset",
+      "parent",
+      "print",
+      "removeEventListener",
+      "resizeBy",
+      "resizeTo",
+      "screen",
+      "screenLeft",
+      "screenTop",
+      "screenX",
+      "screenY",
+      "scroll",
+      "scrollbars",
+      "scrollBy",
+      "scrollTo",
+      "scrollX",
+      "scrollY",
+      "status",
+      "statusbar",
+      "stop",
+      "toolbar",
+      "top"
+    ],
+    "eslint/no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "react-router",
+            "importNames": ["useNavigate"],
+            "message": "Please import Actual's useNavigate() hook from `src/hooks` instead."
+          },
+          {
+            "name": "react-redux",
+            "importNames": ["useDispatch"],
+            "message": "Please import Actual's useDispatch() hook from `src/redux` instead."
+          },
+          {
+            "name": "react-redux",
+            "importNames": ["useSelector"],
+            "message": "Please import Actual's useSelector() hook from `src/redux` instead."
+          },
+          {
+            "name": "react-redux",
+            "importNames": ["useStore"],
+            "message": "Please import Actual's useStore() hook from `src/redux` instead."
+          }
+        ],
+        "patterns": [
+          {
+            "group": ["**/*.api", "**/*.electron"],
+            "message": "Don't directly reference imports from other platforms"
+          },
+          {
+            "group": ["uuid"],
+            "importNames": ["*"],
+            "message": "Use `import { v4 as uuidv4 } from 'uuid'` instead"
+          },
+          {
+            "group": ["**/style", "**/colors"],
+            "importNames": ["colors"],
+            "message": "Please use themes instead of colors"
+          },
+          {
+            "group": ["**/style/themes/*"],
+            "message": "Please do not import theme files directly"
+          },
+          {
+            "group": ["@actual-app/web/**/*"],
+            "message": "Please do not import `@actual-app/web` in `loot-core`"
+          }
+        ]
+      }
+    ],
+    "eslint/no-useless-constructor": "error",
+    "eslint/no-undef": "error",
+    "eslint/no-unused-expressions": "error",
+    "eslint/no-return-assign": "error",
+    "eslint/no-unused-vars": "error"
+  },
+  "overrides": [
+    {
+      "files": ["packages/desktop-electron/**/*"],
+      "rules": {
+        "react/rules-of-hooks": "off"
+      }
+    },
+    {
+      "files": ["**/*.test.{js,ts,jsx,tsx}", "packages/docs/**/*"],
+      "rules": {
+        "actual/no-untranslated-strings": "off",
+        "actual/prefer-logger-over-console": "off"
+      }
+    },
+    {
+      "files": [
+        "packages/api/migrations/*",
+        "packages/loot-core/migrations/*",
+        "packages/sync-server/src/app-gocardless/banks/*.js",
+        "*.config.{ts,mts,mjs}"
+      ],
+      "rules": {
+        "import/no-default-export": "off"
+      }
+    },
+    {
+      "files": ["packages/docs/**/*"],
+      "rules": {
+        "actual/no-anchor-tag": "off"
+      }
+    },
+    {
+      "files": ["packages/desktop-client/**/*.{js,ts,jsx,tsx}"],
+      "rules": {
+        "typescript-paths/absolute-parent-import": [
+          "error",
+          { "preferPathOverBaseUrl": true }
+        ],
+        "typescript-paths/absolute-import": ["error", { "enableAlias": false }]
+      }
+    },
+    {
+      "files": ["packages/desktop-client/src/style/themes/*"],
+      "rules": {
+        "eslint/no-restricted-imports": "off"
+      }
+    },
+    // TODO: enable these
+    {
+      "files": [
+        "packages/desktop-client/src/components/ManageRules.tsx",
+        "packages/desktop-client/src/components/mobile/budget/ExpenseGroupList.tsx",
+        "packages/desktop-client/src/components/reports/reports/Calendar.tsx",
+        "packages/desktop-client/src/components/table.tsx"
+      ],
+      "rules": {
+        "eslint/no-empty-function": "off"
+      }
+    }
+  ]
+}

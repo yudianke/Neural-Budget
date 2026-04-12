@@ -1,0 +1,179 @@
+import { listen } from '@actual-app/core/platform/client/connection';
+import * as undo from '@actual-app/core/platform/client/undo';
+// @ts-strict-ignore
+import type { QueryClient } from '@tanstack/react-query';
+
+import { accountQueries } from './accounts';
+import { setAppState } from './app/appSlice';
+import { categoryQueries } from './budget';
+import { closeBudgetUI } from './budgetfiles/budgetfilesSlice';
+import { closeModal, pushModal, replaceModal } from './modals/modalsSlice';
+import {
+  addGenericErrorNotification,
+  addNotification,
+} from './notifications/notificationsSlice';
+import { payeeQueries } from './payees';
+import { loadPrefs } from './prefs/prefsSlice';
+import type { AppStore } from './redux/store';
+import * as syncEvents from './sync-events';
+
+export function handleGlobalEvents(store: AppStore, queryClient: QueryClient) {
+  const unlistenServerError = listen('server-error', () => {
+    store.dispatch(addGenericErrorNotification());
+  });
+
+  const unlistenOrphanedPayees = listen(
+    'orphaned-payees',
+    ({ orphanedIds, updatedPayeeIds }) => {
+      // Right now, it prompts to merge into the first payee
+      store.dispatch(
+        pushModal({
+          modal: {
+            name: 'merge-unused-payees',
+            options: {
+              payeeIds: orphanedIds,
+              targetPayeeId: updatedPayeeIds[0],
+            },
+          },
+        }),
+      );
+    },
+  );
+
+  const unlistenSchedulesOffline = listen('schedules-offline', () => {
+    store.dispatch(
+      pushModal({ modal: { name: 'schedule-posts-offline-notification' } }),
+    );
+  });
+
+  const unlistenSync = syncEvents.listenForSyncEvent(store, queryClient);
+
+  const unlistenUndo = listen('undo-event', undoState => {
+    const { tables, undoTag } = undoState;
+    const promises: Promise<unknown>[] = [];
+
+    if (
+      tables.includes('categories') ||
+      tables.includes('category_groups') ||
+      tables.includes('category_mapping')
+    ) {
+      promises.push(
+        queryClient.invalidateQueries({
+          queryKey: categoryQueries.lists(),
+        }),
+      );
+    }
+
+    if (
+      tables.includes('accounts') ||
+      tables.includes('payees') ||
+      tables.includes('payee_mapping')
+    ) {
+      void queryClient.invalidateQueries({
+        queryKey: payeeQueries.lists(),
+      });
+    }
+
+    if (tables.includes('accounts')) {
+      promises.push(
+        queryClient.invalidateQueries({
+          queryKey: accountQueries.lists(),
+        }),
+      );
+    }
+
+    const tagged = undo.getTaggedState(undoTag);
+
+    if (tagged) {
+      void Promise.all(promises).then(() => {
+        undo.setUndoState('undoEvent', undoState);
+
+        // If a modal has been tagged, open it instead of navigating
+        if (tagged.openModal) {
+          const { modalStack } = store.getState().modals;
+
+          if (
+            modalStack.length === 0 ||
+            modalStack[modalStack.length - 1].name !== tagged.openModal.name
+          ) {
+            store.dispatch(replaceModal({ modal: tagged.openModal }));
+          }
+        } else {
+          store.dispatch(closeModal());
+
+          if (
+            window.location.href.replace(window.location.origin, '') !==
+            tagged.url
+          ) {
+            void window.__navigate(tagged.url);
+            // This stops propagation of the undo event, which is
+            // important because if we are changing URLs any existing
+            // undo listeners on the current page don't need to be run
+            return true;
+          }
+        }
+      });
+    }
+  });
+
+  const unlistenFallbackWriteError = listen('fallback-write-error', () => {
+    store.dispatch(
+      addNotification({
+        notification: {
+          type: 'error',
+          title: 'Unable to save changes',
+          sticky: true,
+          message:
+            'This browser only supports using the app in one tab at a time, ' +
+            'and another tab has opened the app. No changes will be saved ' +
+            'from this tab; please close it and continue working in the other one.',
+        },
+      }),
+    );
+  });
+
+  const unlistenStartLoad = listen('start-load', () => {
+    void store.dispatch(closeBudgetUI());
+    store.dispatch(setAppState({ loadingText: '' }));
+  });
+
+  const unlistenFinishLoad = listen('finish-load', () => {
+    store.dispatch(closeModal());
+    store.dispatch(setAppState({ loadingText: null }));
+    void store.dispatch(loadPrefs());
+  });
+
+  const unlistenStartImport = listen('start-import', () => {
+    void store.dispatch(closeBudgetUI());
+  });
+
+  const unlistenFinishImport = listen('finish-import', () => {
+    store.dispatch(closeModal());
+    store.dispatch(setAppState({ loadingText: null }));
+    void store.dispatch(loadPrefs());
+  });
+
+  const unlistenShowBudgets = listen('show-budgets', () => {
+    void store.dispatch(closeBudgetUI());
+    store.dispatch(setAppState({ loadingText: null }));
+  });
+
+  const unlistenApiFetchRedirected = listen('api-fetch-redirected', () => {
+    void window.Actual.reload();
+  });
+
+  return () => {
+    unlistenServerError();
+    unlistenOrphanedPayees();
+    unlistenSchedulesOffline();
+    unlistenSync();
+    unlistenUndo();
+    unlistenFallbackWriteError();
+    unlistenStartLoad();
+    unlistenFinishLoad();
+    unlistenStartImport();
+    unlistenFinishImport();
+    unlistenShowBudgets();
+    unlistenApiFetchRedirected();
+  };
+}

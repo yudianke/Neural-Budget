@@ -1,0 +1,51 @@
+import React from 'react';
+
+import { View } from '@actual-app/components/view';
+import type { AccountEntity } from '@actual-app/core/types/models';
+
+import { useLocale } from '#hooks/useLocale';
+
+import { AccountRow } from './AccountRow';
+
+type AccountsListProps = {
+  accounts: AccountEntity[];
+  hoveredAccount?: string | null;
+  onHover: (id: AccountEntity['id'] | null) => void;
+  onAction: (account: AccountEntity, action: 'link' | 'edit') => void;
+};
+
+export function AccountsList({
+  accounts,
+  hoveredAccount,
+  onHover,
+  onAction,
+}: AccountsListProps) {
+  const locale = useLocale();
+
+  if (accounts.length === 0) {
+    return null;
+  }
+
+  return (
+    <View
+      style={{
+        marginBottom: -1,
+      }}
+    >
+      {accounts.map(account => {
+        const hovered = hoveredAccount === account.id;
+
+        return (
+          <AccountRow
+            key={account.id}
+            account={account}
+            hovered={hovered}
+            onHover={onHover}
+            onAction={onAction}
+            locale={locale}
+          />
+        );
+      })}
+    </View>
+  );
+}

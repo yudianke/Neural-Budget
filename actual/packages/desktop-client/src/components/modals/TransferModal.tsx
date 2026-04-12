@@ -1,0 +1,145 @@
+import React, { useMemo, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+
+import { Button } from '@actual-app/components/button';
+import { InitialFocus } from '@actual-app/components/initial-focus';
+import { styles } from '@actual-app/components/styles';
+import { View } from '@actual-app/components/view';
+import type { IntegerAmount } from '@actual-app/core/shared/util';
+
+import {
+  addToBeBudgetedGroup,
+  removeCategoriesFromGroups,
+} from '#components/budget/util';
+import { Modal, ModalCloseButton, ModalHeader } from '#components/common/Modal';
+import { FieldLabel, TapField } from '#components/mobile/MobileForms';
+import { AmountInput } from '#components/util/AmountInput';
+import { useCategories } from '#hooks/useCategories';
+import { useSyncedPref } from '#hooks/useSyncedPref';
+import { pushModal } from '#modals/modalsSlice';
+import type { Modal as ModalType } from '#modals/modalsSlice';
+import { useDispatch } from '#redux';
+
+type TransferModalProps = Extract<ModalType, { name: 'transfer' }>['options'];
+
+export function TransferModal({
+  title,
+  categoryId,
+  month,
+  amount: initialAmount,
+  showToBeBudgeted,
+  onSubmit,
+}: TransferModalProps) {
+  const { t } = useTranslation();
+  const [hideFraction] = useSyncedPref('hideFraction');
+
+  const { data: { grouped: originalCategoryGroups } = { grouped: [] } } =
+    useCategories();
+  const [categoryGroups, categories] = useMemo(() => {
+    const expenseGroups = originalCategoryGroups.filter(g => !g.is_income);
+    const categoryGroups = showToBeBudgeted
+      ? addToBeBudgetedGroup(expenseGroups)
+      : expenseGroups;
+
+    const filteredCategoryGroups = categoryId
+      ? removeCategoriesFromGroups(categoryGroups, categoryId)
+      : categoryGroups;
+    const filteredCategories = filteredCategoryGroups.flatMap(
+      g => g.categories || [],
+    );
+    return [filteredCategoryGroups, filteredCategories];
+  }, [categoryId, originalCategoryGroups, showToBeBudgeted]);
+
+  const [amount, setAmount] = useState<IntegerAmount>(initialAmount);
+  const [toCategoryId, setToCategoryId] = useState<string | null>(null);
+  const dispatch = useDispatch();
+
+  const openCategoryModal = () => {
+    dispatch(
+      pushModal({
+        modal: {
+          name: 'category-autocomplete',
+          options: {
+            categoryGroups,
+            month,
+            showHiddenCategories: true,
+            onSelect: categoryId => {
+              setToCategoryId(categoryId);
+            },
+          },
+        },
+      }),
+    );
+  };
+
+  const _onSubmit = (newAmount: number, categoryId: string | null) => {
+    if (newAmount && categoryId) {
+      onSubmit?.(newAmount, categoryId);
+    }
+  };
+
+  const toCategory = categories.find(c => c.id === toCategoryId);
+
+  return (
+    <Modal name="transfer">
+      {({ state }) => (
+        <>
+          <ModalHeader
+            title={title}
+            rightContent={<ModalCloseButton onPress={() => state.close()} />}
+          />
+          <View>
+            <View>
+              <FieldLabel title={t('Transfer this amount:')} />
+              <InitialFocus>
+                <AmountInput
+                  value={amount}
+                  autoDecimals={String(hideFraction) !== 'true'}
+                  style={{
+                    marginLeft: styles.mobileEditingPadding,
+                    marginRight: styles.mobileEditingPadding,
+                  }}
+                  inputStyle={{
+                    height: styles.mobileMinHeight,
+                  }}
+                  onUpdate={setAmount}
+                  onEnter={() => {
+                    if (!toCategoryId) {
+                      openCategoryModal();
+                    }
+                  }}
+                />
+              </InitialFocus>
+            </View>
+
+            <FieldLabel title="To:" />
+            <TapField value={toCategory?.name} onPress={openCategoryModal} />
+
+            <View
+              style={{
+                justifyContent: 'center',
+                alignItems: 'center',
+                paddingTop: 10,
+              }}
+            >
+              <Button
+                variant="primary"
+                style={{
+                  height: styles.mobileMinHeight,
+                  marginLeft: styles.mobileEditingPadding,
+                  marginRight: styles.mobileEditingPadding,
+                }}
+                onPress={() => {
+                  _onSubmit(amount, toCategoryId);
+                  state.close();
+                }}
+              >
+                <Trans>Transfer</Trans>
+              </Button>
+            </View>
+          </View>
+        </>
+      )}
+    </Modal>
+  );
+}

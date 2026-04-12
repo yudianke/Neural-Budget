@@ -1,0 +1,37 @@
+import React from 'react';
+import type { ComponentProps } from 'react';
+
+import { theme } from '@actual-app/components/theme';
+
+import type { CellValue } from '#components/spreadsheet/CellValue';
+import { useSheetValue } from '#hooks/useSheetValue';
+
+import { fraction } from './fraction';
+import { PieProgress } from './PieProgress';
+
+type IncomeProgressProps = {
+  current: ComponentProps<typeof CellValue>['binding'];
+  target: ComponentProps<typeof CellValue>['binding'];
+};
+export function IncomeProgress({ current, target }: IncomeProgressProps) {
+  let totalIncome = useSheetValue(current) || 0;
+  const totalBudgeted = useSheetValue(target) || 0;
+
+  let over = false;
+
+  if (totalIncome < 0) {
+    over = true;
+    totalIncome = -totalIncome;
+  }
+
+  const frac = fraction(totalIncome, totalBudgeted);
+
+  return (
+    <PieProgress
+      progress={frac}
+      color={over ? theme.numberNegative : theme.numberPositive}
+      backgroundColor={over ? theme.errorBackground : theme.budgetCurrentMonth}
+      style={{ width: 20, height: 20 }}
+    />
+  );
+}

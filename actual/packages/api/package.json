@@ -1,0 +1,51 @@
+{
+  "name": "@actual-app/api",
+  "version": "26.4.0",
+  "description": "An API for Actual",
+  "license": "MIT",
+  "files": [
+    "@types",
+    "dist"
+  ],
+  "main": "dist/index.js",
+  "types": "@types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./@types/index.d.ts",
+      "development": "./index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./@types/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest --run",
+    "typecheck": "tsgo -b && tsc-strict"
+  },
+  "dependencies": {
+    "@actual-app/core": "workspace:*",
+    "@actual-app/crdt": "workspace:*",
+    "better-sqlite3": "^12.6.2",
+    "compare-versions": "^6.1.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "^7.0.0-dev.20260309.1",
+    "rollup-plugin-visualizer": "^6.0.11",
+    "typescript-strict-plugin": "^2.4.4",
+    "vite": "^8.0.5",
+    "vite-plugin-dts": "^4.5.4",
+    "vite-plugin-peggy-loader": "^2.0.1",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
