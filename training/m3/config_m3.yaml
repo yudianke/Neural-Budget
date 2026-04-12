@@ -1,12 +1,8 @@
-data_path: "/data/synthetic_transactions.csv"
-mlflow_tracking_uri: "http://129.114.25.172:8000"
-experiment_name: "m3-forecasting"
+mlflow_tracking_uri: http://129.114.25.172:8000
+experiment_name: m3-forecast
+registered_model_name: m3-forecast-base
 
-prophet:
-  changepoint_prior_scale: 0.05
-  seasonality_prior_scale: 10.0
-  seasonality_mode: "additive"
+train_path: swift://neural-budget-data-proj16/processed/forecasting_train.csv
+eval_path: swift://neural-budget-data-proj16/processed/forecasting_eval.csv
 
-min_months: 12
-min_transactions: 50
-split_months: 2
+quality_gate_median_mae: 1000.0
