@@ -2,19 +2,23 @@ import argparse
 import os
 import platform
 import sys
+import tempfile
 import time
+from pathlib import Path
 
+import joblib
 import mlflow
 import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 from mlflow.tracking import MlflowClient
-from scipy.sparse import csr_matrix, hstack
+from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -46,13 +50,19 @@ TEXT_COL = "merchant"
 LABEL_COL = "project_category"
 
 
+def ensure_numeric_cols(df):
+    for col in NUMERIC_COLS:
+        if col not in df.columns:
+            df[col] = 0
+        else:
+            df[col] = df[col].fillna(0)
+    return df
+
+
 def load_synthetic(bootstrap_path, production_path):
     df = load_and_combine(bootstrap_path, production_path, prefix="M1")
     df = df.dropna(subset=[LABEL_COL, TEXT_COL])
-    for col in NUMERIC_COLS:
-        if col in df.columns:
-            df[col] = df[col].fillna(0)
-    return df
+    return ensure_numeric_cols(df)
 
 
 def load_real_eval(path):
@@ -66,7 +76,7 @@ def load_real_eval(path):
     df["month"] = df["date"].dt.month
     df["repeat_count"] = 0
     df["is_recurring_candidate"] = 0
-    return df
+    return ensure_numeric_cols(df)
 
 
 def build_model(config):
@@ -92,31 +102,31 @@ def build_model(config):
         )
     else:
         raise ValueError(f"unknown model type {mt}")
-    return tfidf, clf
-
-
-def featurize(tfidf, df, fit=False):
-    text_vec = (
-        tfidf.fit_transform(df[TEXT_COL].astype(str))
-        if fit
-        else tfidf.transform(df[TEXT_COL].astype(str))
+    return Pipeline(
+        [
+            (
+                "features",
+                ColumnTransformer(
+                    [
+                        ("text", tfidf, TEXT_COL),
+                        ("num", "passthrough", NUMERIC_COLS),
+                    ],
+                    sparse_threshold=1.0,
+                ),
+            ),
+            ("clf", clf),
+        ]
     )
-    num_cols = [c for c in NUMERIC_COLS if c in df.columns]
-    if num_cols:
-        num_vec = csr_matrix(df[num_cols].values.astype(float))
-        return hstack([text_vec, num_vec])
-    return text_vec
 
 
-def evaluate(clf, tfidf, df, le, label):
+def evaluate(pipeline, df, le, label):
     known_mask = df[LABEL_COL].isin(le.classes_)
     n_filtered = int((~known_mask).sum())
     df_eval = df[known_mask].reset_index(drop=True)
     if len(df_eval) == 0:
         return 0.0, 0.0, 0
-    X = featurize(tfidf, df_eval, fit=False)
     y_true = le.transform(df_eval[LABEL_COL])
-    y_pred = clf.predict(X)
+    y_pred = pipeline.predict(df_eval)
     macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
     weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
     log(f"{label}: macro_f1={macro:.4f} weighted_f1={weighted:.4f} n={len(df_eval)} filtered={n_filtered}")
@@ -151,8 +161,7 @@ def main():
     le = LabelEncoder()
     y_train = le.fit_transform(train_df[LABEL_COL])
 
-    tfidf, clf = build_model(config)
-    X_train = featurize(tfidf, train_df, fit=True)
+    pipeline = build_model(config)
 
     with mlflow.start_run() as run:
         mlflow.log_params(
@@ -184,12 +193,12 @@ def main():
             )
 
         start = time.time()
-        clf.fit(X_train, y_train)
+        pipeline.fit(train_df, y_train)
         train_time = time.time() - start
         mlflow.log_metric("train_time_seconds", train_time)
 
-        synth_macro, synth_weighted, _ = evaluate(clf, tfidf, synth_eval_df, le, "synthetic_eval")
-        real_macro, real_weighted, _ = evaluate(clf, tfidf, real_eval_df, le, "real_eval")
+        synth_macro, synth_weighted, _ = evaluate(pipeline, synth_eval_df, le, "synthetic_eval")
+        real_macro, real_weighted, _ = evaluate(pipeline, real_eval_df, le, "real_eval")
 
         mlflow.log_metric("synth_macro_f1", synth_macro)
         mlflow.log_metric("synth_weighted_f1", synth_weighted)
@@ -216,13 +225,18 @@ def main():
         mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")
         mlflow.set_tag("mode", args.mode)
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            le_path = Path(tmpdir) / "label_encoder.joblib"
+            joblib.dump(le, le_path)
+            mlflow.log_artifact(str(le_path), artifact_path="model")
+
         if do_register:
-            mlflow.sklearn.log_model(clf, artifact_path="model")
+            mlflow.sklearn.log_model(pipeline, artifact_path="model")
             client = MlflowClient()
             mv = register_model_version(client, registered_model_name, run.info.run_id, "model")
             log(f"REGISTERED v{mv.version} — {reason}")
         else:
-            mlflow.sklearn.log_model(clf, artifact_path="model")
+            mlflow.sklearn.log_model(pipeline, artifact_path="model")
             log(f"NOT REGISTERED — {reason}")
 
         log(f"done | run_id={run.info.run_id}")

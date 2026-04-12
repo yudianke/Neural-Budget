@@ -82,28 +82,17 @@ def should_register(mode, current_metric, previous_metric, higher_is_better, abs
     if not absolute_gate_passed:
         return False, f"absolute gate failed (current={current_metric:.4f})"
 
-    if mode == "bootstrap":
-        return True, f"bootstrap mode, absolute gate passed (current={current_metric:.4f})"
-
     if previous_metric is None:
-        return True, f"retrain mode but no previous version, registering (current={current_metric:.4f})"
+        return True, f"no previous version, registering (current={current_metric:.4f})"
 
     if higher_is_better:
         improved = current_metric > previous_metric
-        delta = current_metric - previous_metric
     else:
         improved = current_metric < previous_metric
-        delta = previous_metric - current_metric
 
     if improved:
-        return (
-            True,
-            f"improved over previous (prev={previous_metric:.4f} -> curr={current_metric:.4f}, delta=+{abs(delta):.4f})",
-        )
-    return (
-        False,
-        f"no improvement over previous (prev={previous_metric:.4f} -> curr={current_metric:.4f}, delta=-{abs(delta):.4f})",
-    )
+        return True, f"improved (prev={previous_metric:.4f} -> curr={current_metric:.4f})"
+    return False, f"no improvement (prev={previous_metric:.4f} -> curr={current_metric:.4f})"
 
 
 def register_model_version(client, model_name, run_id, artifact_path):
