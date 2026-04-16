@@ -10,8 +10,20 @@ services:
     image: actual-development
     environment:
       - HTTPS
+      - M1_SERVICE_URL=http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - '3001:3001'
     volumes:
       - '.:/app'
+      - '/app/node_modules'
+      - '/app/packages/loot-core/node_modules'
+      - '/app/packages/desktop-client/node_modules'
+      - '/app/packages/component-library/node_modules'
+      - '/app/packages/crdt/node_modules'
+      - '/app/packages/sync-server/node_modules'
+      - '/app/packages/api/node_modules'
+      - '/app/packages/desktop-electron/node_modules'
+      - '/app/packages/plugins-service/node_modules'
     restart: 'no'

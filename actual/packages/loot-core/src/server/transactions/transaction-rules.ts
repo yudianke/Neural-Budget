@@ -41,6 +41,8 @@ import type {
   TransactionEntity,
 } from '#types/models';
 
+import { predictCategory as predictCategoryFromML } from './ml-service';
+
 import { batchUpdateTransactions } from '.';
 
 // TODO: Detect if it looks like the user is creating a rename rule
@@ -362,6 +364,13 @@ export async function runRules(
     } else {
       // if there is no scheduleRuleID then just run all rules.
       finalTrans = rules[i].apply(finalTrans);
+    }
+  }
+
+  if (!finalTrans.category) {
+    const predictedCategoryId = await predictCategoryFromML(finalTrans);
+    if (predictedCategoryId) {
+      finalTrans.category = predictedCategoryId;
     }
   }
 

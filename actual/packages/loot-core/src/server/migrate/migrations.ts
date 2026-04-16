@@ -13,6 +13,7 @@ import m1722717601000 from '../../../migrations/1722717601000_reports_move_selec
 import m1722804019000 from '../../../migrations/1722804019000_create_dashboard_table';
 import m1723665565000 from '../../../migrations/1723665565000_prefs';
 import m1765518577215 from '../../../migrations/1765518577215_multiple_dashboards';
+import m1776000000000 from '../../../migrations/1776000000000_add_m1_categories';
 
 let MIGRATIONS_DIR = fs.migrationsPath;
 
@@ -22,6 +23,7 @@ const javascriptMigrations = {
   1722804019000: m1722804019000,
   1723665565000: m1723665565000,
   1765518577215: m1765518577215,
+  1776000000000: m1776000000000,
 };
 
 export async function withMigrationsDir(
