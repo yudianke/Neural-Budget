@@ -1,5 +1,5 @@
 data_path: "/data/moneydata.csv"
-mlflow_tracking_uri: "http://129.114.25.172:8000"
+mlflow_tracking_uri: "http://129.114.27.243:8000"
 experiment_name: "m1-categorization-ray"
 
 tfidf:

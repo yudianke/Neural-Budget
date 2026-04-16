@@ -229,6 +229,10 @@ def main():
             le_path = Path(tmpdir) / "label_encoder.joblib"
             joblib.dump(le, le_path)
             mlflow.log_artifact(str(le_path), artifact_path="model")
+            tfidf_path = Path(tmpdir) / "tfidf_vectorizer.joblib"
+            tfidf = pipeline.named_steps["features"].named_transformers_["text"]
+            joblib.dump(tfidf, tfidf_path)
+            mlflow.log_artifact(str(tfidf_path), artifact_path="preprocessor")
 
         if do_register:
             mlflow.sklearn.log_model(pipeline, artifact_path="model")

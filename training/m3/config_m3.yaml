@@ -1,4 +1,4 @@
-mlflow_tracking_uri: http://129.114.25.172:8000
+mlflow_tracking_uri: http://129.114.27.243:8000
 experiment_name: m3-forecast
 registered_model_name: m3-forecast-base
 
