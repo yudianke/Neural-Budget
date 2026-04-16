@@ -5,3 +5,6 @@ training/m1/data/
 training/m3/data/
 
 datasets/
+__pycache__/
+*.pyc
+.env
