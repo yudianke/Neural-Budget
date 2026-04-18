@@ -1,50 +1,152 @@
-version: "3.9"
+# NeuralBudget ML Stack
+# ---------------------
+# Usage:  docker compose up -d --build
+#
+# Prerequisites on host:
+#   /home/cc/Neural-Budget/training/m1/data/moneydata.csv
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY exported in the shell
+#   or stored in a local .env file (not committed)
+
+volumes:
+  feedback_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  ml-net:
+    driver: bridge
 
 services:
-  postgres:
-    image: postgres:16
-    container_name: nb-postgres
-    environment:
-      POSTGRES_DB: neuralbudget
-      POSTGRES_USER: nb_user
-      POSTGRES_PASSWORD: nb_pass
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./training/m3/schemas.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
-  forecast-api:
+  # --------------------------------------------------------------------------
+  # M1 Categorization Serving
+  # --------------------------------------------------------------------------
+  m1-serving:
     build:
-      context: .
-      dockerfile: training/m3/Dockerfile
-    container_name: nb-forecast-api
+      context: ./serving/m1_baseline
+      dockerfile: Dockerfile
+    image: m1-serving:latest
+    container_name: m1-serving
+    ports:
+      - "8001:8001"
     environment:
-      DATABASE_URL: postgresql://nb_user:nb_pass@postgres:5432/neuralbudget
-      M3_V2_BUNDLE_PATH: /app/m3_v2_bundle.joblib
-      M3_V2_FEATURES_PATH: /app/m3_v2_latest_features.csv
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M1_REGISTERED_MODEL_NAME: "m1-ray-categorization"
+      M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
+    volumes:
+      - feedback_data:/data/feedback
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Retrain Daemon (M1)
+  # --------------------------------------------------------------------------
+  retrain-daemon:
+    build:
+      context: ./training
+      dockerfile: m1_ray/Dockerfile
+    image: retrain-daemon:latest
+    container_name: retrain-daemon
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M1_SERVING_URL: "http://m1-serving:8001"
+      M1_SERVING_CONTAINER: "m1-serving"
+      M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
+      M1_DAEMON_STATE_PATH: "/data/feedback/daemon_state.json"
+      M1_RAY_CONFIG: "/app/training/m1_ray/config_m1_ray.yaml"
+      M1_BOOTSTRAP_DATA_PATH: "/data/moneydata.csv"
+      CHECK_INTERVAL_SECONDS: "300"
+      AWS_ACCESS_KEY_ID: "0fc136376b7c47528dfd06a09d12ccbd"
+      AWS_SECRET_ACCESS_KEY: "b52fcbb61618453aacc6ababb530031c"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    volumes:
+      - feedback_data:/data/feedback
+      - /home/cc/Neural-Budget/training/m1/data/moneydata.csv:/data/moneydata.csv:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ml-net
+    depends_on:
+      m1-serving:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # M3 Forecast Serving
+  # --------------------------------------------------------------------------
+  m3-serving:
+    build:
+      context: ./serving/m3
+      dockerfile: Dockerfile
+    image: m3-serving:latest
+    container_name: m3-serving
     ports:
       - "8002:8002"
-    depends_on:
-      - postgres
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M3_REGISTERED_MODEL: "m3-forecast-v2"
+      AWS_ACCESS_KEY_ID: "0fc136376b7c47528dfd06a09d12ccbd"
+      AWS_SECRET_ACCESS_KEY: "b52fcbb61618453aacc6ababb530031c"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
+  # --------------------------------------------------------------------------
+  # Prometheus
+  # --------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:latest
-    container_name: nb-prometheus
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      - forecast-api
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    networks:
+      - ml-net
+    restart: unless-stopped
 
+  # --------------------------------------------------------------------------
+  # Grafana
+  # --------------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:latest
-    container_name: nb-grafana
+    image: grafana/grafana:10.4.0
+    container_name: grafana
     ports:
       - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-neuralbudget}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3000}"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - ml-net
     depends_on:
       - prometheus
-
-volumes:
-  postgres_data:
+    restart: unless-stopped

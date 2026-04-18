@@ -34,6 +34,7 @@ from _common import (  # noqa: E402
     setup_mlflow,
     should_register,
 )
+from safeguarding import run_safeguarding_checks  # noqa: E402
 
 os.environ["GIT_PYTHON_REFRESH"] = "quiet"
 
@@ -232,9 +233,16 @@ def main():
     config = load_config(args.config)
 
     if "s3" in config:
-        os.environ["AWS_ACCESS_KEY_ID"] = config["s3"]["access_key"]
-        os.environ["AWS_SECRET_ACCESS_KEY"] = config["s3"]["secret_key"]
-        os.environ["AWS_ENDPOINT_URL"] = config["s3"]["endpoint_url"]
+        s3_cfg = config["s3"]
+        access_key = os.environ.get("AWS_ACCESS_KEY_ID") or s3_cfg.get("access_key")
+        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or s3_cfg.get("secret_key")
+        endpoint_url = os.environ.get("AWS_ENDPOINT_URL") or s3_cfg.get("endpoint_url")
+        if access_key:
+            os.environ["AWS_ACCESS_KEY_ID"] = access_key
+        if secret_key:
+            os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
+        if endpoint_url:
+            os.environ["AWS_ENDPOINT_URL"] = endpoint_url
 
     tracking_uri = setup_mlflow(config)
     data_path = os.environ.get("M1_RAY_DATA_PATH", config["data_path"])
@@ -376,6 +384,17 @@ def main():
                     if isinstance(metrics, dict):
                         safe = cat.replace(" ", "_").replace("/", "_")
                         mlflow.log_metric(f"f1_{safe}", metrics["f1-score"])
+
+                # Safeguarding: fairness, explainability, robustness, privacy, accountability
+                run_safeguarding_checks(
+                    y_test=y_test,
+                    y_pred=y_pred,
+                    le=le,
+                    tfidf=tfidf,
+                    feature_cols=feature_cols,
+                    pred_proba=pred_proba if pred_proba.ndim > 1 else None,
+                    data_path=resolved_data_path,
+                )
 
                 mlflow.xgboost.log_model(bst, "model")
 

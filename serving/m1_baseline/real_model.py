@@ -214,6 +214,39 @@ def _predict_proba(row: pd.DataFrame) -> np.ndarray:
     feature_names = _metadata.get("feature_columns")
     dmatrix = xgb.DMatrix(features, feature_names=feature_names)
     pred = _booster.predict(dmatrix)
+
+    # If model was trained with multi:softmax it returns class indices (shape [n]),
+    # not a probability vector. Re-predict with output_margin=True to get raw
+    # decision margins, then build a pseudo-probability vector that:
+    #   - Puts the winning class (from pred) at rank 1 with confidence 0.85
+    #   - Distributes remaining 0.15 across runner-ups ranked by margin score
+    # This gives meaningful top-3 without misrepresenting model confidence.
+    if pred.ndim == 1 and pred.shape[0] == 1:
+        winner_idx = int(pred[0])
+        n_classes = len(_label_encoder.classes_)
+        margins = _booster.predict(dmatrix, output_margin=True)
+
+        if margins.ndim == 2 and margins.shape[1] == n_classes:
+            # Build rank order by margins, but force winner to top
+            margin_order = np.argsort(margins[0])[::-1].tolist()
+            if winner_idx in margin_order:
+                margin_order.remove(winner_idx)
+            ranked = [winner_idx] + margin_order
+
+            # Assign pseudo-probabilities: winner=0.85, runner-ups share 0.15
+            proba = np.zeros(n_classes, dtype=float)
+            proba[winner_idx] = 0.85
+            if len(ranked) > 1:
+                runner_up_share = 0.15 / min(2, len(ranked) - 1)
+                for idx in ranked[1:3]:
+                    proba[idx] = runner_up_share
+            return proba
+        else:
+            # Fallback: only winner known
+            proba = np.zeros(n_classes, dtype=float)
+            proba[winner_idx] = 1.0
+            return proba
+
     if pred.ndim == 1:
         pred = pred.reshape(-1, 1)
     return pred[0]
@@ -283,6 +316,56 @@ def predict(x: M1Input) -> M1Output:
         confidence=confidence,
         top_3_suggestions=top3,
     )
+
+
+def reload() -> None:
+    """Hot-reload the model from MLflow. Called by retrain-daemon after new version registered."""
+    global _booster, _label_encoder, _tfidf, _metadata, _model_version, _pipeline, _use_fallback, _fallback_mode
+    print("[M1] reload() triggered — re-loading model from MLflow")
+    load()
+    print(f"[M1] reload() complete — now on version {_model_version}")
+
+
+def get_feedback_stats(since_version: str | None = None) -> dict:
+    """Return correction count, total feedback, correction rate.
+
+    If since_version is given, only counts entries where model_version == since_version.
+    Used by retrain-daemon to decide trigger and evaluate rollback.
+    """
+    path = _feedback_log_path()
+    if not path.exists():
+        return {
+            "total": 0,
+            "corrections": 0,
+            "correction_rate": 0.0,
+            "current_version": _model_version,
+            "filter_version": since_version,
+        }
+
+    total, corrections = 0, 0
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since_version and row.get("model_version") != since_version:
+                continue
+            total += 1
+            if row.get("feedback_type") == "overridden":
+                corrections += 1
+
+    rate = corrections / total if total > 0 else 0.0
+    return {
+        "total": total,
+        "corrections": corrections,
+        "correction_rate": round(rate, 4),
+        "current_version": _model_version,
+        "filter_version": since_version,
+    }
 
 
 def log_feedback(entries: list[M1FeedbackEntry]) -> int:

@@ -419,6 +419,11 @@ function MlSuggestionsSection({
           key={s.category}
           type="button"
           disabled={!s.categoryId}
+          onMouseDown={e => {
+            // Prevent the input from losing focus before the click registers,
+            // which would close the dropdown before onSelect fires.
+            e.preventDefault();
+          }}
           onClick={() => s.categoryId && onSelect?.(s.categoryId)}
           className={css({
             display: 'flex',
