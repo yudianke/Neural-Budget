@@ -376,6 +376,21 @@ export function ConfigServer() {
     void navigate('/');
   }
 
+  useEffect(() => {
+    const shouldAutoBootstrapLocalDev =
+      isNonProductionEnvironment() &&
+      window.location.hostname === 'localhost' &&
+      !currentUrl &&
+      !sessionStorage.getItem('actual-local-dev-bootstrapped');
+
+    if (!shouldAutoBootstrapLocalDev) {
+      return;
+    }
+
+    sessionStorage.setItem('actual-local-dev-bootstrapped', 'true');
+    void onCreateTestFile();
+  }, [currentUrl]);
+
   const [syncServerConfig] = useGlobalPref('syncServerConfig');
 
   const hasExternalServerConfig = !syncServerConfig?.port && !!currentUrl;
