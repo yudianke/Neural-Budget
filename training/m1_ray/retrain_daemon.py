@@ -365,11 +365,16 @@ def run():
             retrain_ok = _run_retrain()
 
             if not retrain_ok:
-                log.error("Retrain failed — skipping reload and state update")
+                log.error("Retrain failed — updating correction count to avoid infinite re-trigger")
                 _log_event_to_mlflow("retrain_failed", {
                     "trigger": trigger_reason,
                     "version_before": str(version_before),
                 })
+                # Still advance the correction count and record attempt time
+                # so we don't re-trigger on the same corrections next cycle.
+                state["last_correction_count"] = current_corrections
+                state["last_retrain_at"] = now_iso
+                _save_state(state)
                 time.sleep(CHECK_INTERVAL)
                 continue
 

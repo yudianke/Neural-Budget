@@ -16,6 +16,7 @@ model:
   learning_rate: 0.1
 
 split_date: "2021-01-01"
+feedback_weight: 10   # repeat each feedback row N times to amplify user corrections
 checkpoint_dir: "s3://proj16-mlflow-artifacts/ray-checkpoints"
 
 s3:

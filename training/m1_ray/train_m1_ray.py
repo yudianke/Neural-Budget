@@ -189,9 +189,20 @@ def load_and_prepare(config, mode):
         feedback_df, production_path = _normalize_feedback_df(config["production_path"])
         production_rows = len(feedback_df)
         if production_rows > 0:
-            train_df = pd.concat([train_df, feedback_df], ignore_index=True)
+            # Oversample feedback rows so user corrections have more influence
+            # than the sparse bootstrap data. feedback_weight=10 means each
+            # correction counts as 10 training examples.
+            feedback_weight = int(config.get("feedback_weight", 5))
+            feedback_df_weighted = pd.concat(
+                [feedback_df] * feedback_weight, ignore_index=True
+            )
+            train_df = pd.concat([train_df, feedback_df_weighted], ignore_index=True)
             train_df = train_df.sort_values("date").reset_index(drop=True)
-            log(f"loaded {production_rows} production feedback rows from {production_path}")
+            log(
+                f"loaded {production_rows} feedback rows "
+                f"(oversampled {feedback_weight}x → {production_rows * feedback_weight} rows) "
+                f"from {production_path}"
+            )
 
     train_pd, test_pd, le, tfidf, feature_cols = _featurize_split(
         train_df, test_df, config
@@ -318,6 +329,8 @@ def main():
                     "production_path": production_path or "",
                     "resolved_production_path": resolved_production_path or "",
                     "production_rows": production_rows,
+                    "feedback_weight": int(config.get("feedback_weight", 5)),
+                    "production_rows_weighted": production_rows * int(config.get("feedback_weight", 5)),
                     "split_date": str(config["split_date"]),
                     "n_estimators": config["model"]["n_estimators"],
                     "max_depth": config["model"]["max_depth"],
