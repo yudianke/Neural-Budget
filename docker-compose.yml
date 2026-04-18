@@ -54,6 +54,7 @@ services:
       dockerfile: m1_ray/Dockerfile
     image: retrain-daemon:latest
     container_name: retrain-daemon
+    shm_size: "2gb"
     environment:
       MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
       M1_SERVING_URL: "http://m1-serving:8001"
