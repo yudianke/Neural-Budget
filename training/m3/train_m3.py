@@ -113,6 +113,8 @@ def main():
 
         start = time.time()
         baseline_table = build_baseline_table(train_df)
+        baseline_table.to_csv("m3_baseline.csv", index=False)
+
         per_cat, overall_mean_mae, median_per_cat_mae = evaluate_baseline(eval_df, baseline_table)
         train_time = time.time() - start
 
