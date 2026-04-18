@@ -1,6 +1,5 @@
 import * as Platform from '@actual-app/core/shared/platform';
 import { initBackend as initSQLBackend } from 'absurd-sql/dist/indexeddb-main-thread';
-import { registerSW } from 'virtual:pwa-register';
 
 // oxlint-disable-next-line typescript-paths/absolute-parent-import
 import packageJson from '../package.json';
@@ -204,13 +203,18 @@ class WorkerBridge {
 }
 
 function createBackendWorker() {
+  const shouldUseSharedWorker =
+    typeof SharedWorker !== 'undefined' &&
+    !Platform.isPlaywright &&
+    !(IS_DEV && window.location.hostname === 'localhost');
+
   // Use SharedWorker as a coordinator for multi-tab, multi-budget support.
   // Each budget gets its own leader tab running a dedicated Worker. All other
   // tabs on the same budget are followers — their messages are routed through
   // the SharedWorker to the leader's Worker.
   // The SharedWorker never touches SharedArrayBuffer, so this works on all
   // platforms including iOS/Safari.
-  if (typeof SharedWorker !== 'undefined' && !Platform.isPlaywright) {
+  if (shouldUseSharedWorker) {
     try {
       const sharedWorker = new SharedBrowserServerWorker({
         name: 'actual-backend',
@@ -281,10 +285,20 @@ const isUpdateReadyForDownloadPromise = new Promise(resolve => {
     resolve(true);
   };
 });
-const updateSW = registerSW({
-  immediate: true,
-  onNeedRefresh: markUpdateReadyForDownload,
-});
+const shouldRegisterServiceWorker = !(
+  IS_DEV && window.location.hostname === 'localhost'
+);
+let updateSW = () => {};
+
+if (shouldRegisterServiceWorker) {
+  const pwaRegisterModule = ['virtual', 'pwa-register'].join(':');
+  import(/* @vite-ignore */ pwaRegisterModule).then(({ registerSW }) => {
+    updateSW = registerSW({
+      immediate: true,
+      onNeedRefresh: markUpdateReadyForDownload,
+    });
+  });
+}
 
 global.Actual = {
   IS_DEV,
