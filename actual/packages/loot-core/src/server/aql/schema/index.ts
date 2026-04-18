@@ -54,6 +54,9 @@ export const schema = {
     tombstone: f('boolean'),
     schedule: f('id', { ref: 'schedules' }),
     raw_synced_data: f('string'),
+    anomaly_score: f('float'),
+    anomaly_flags: f('string'),
+    anomaly_dismissed: f('boolean', { default: false }),
     // subtransactions is a special field added if the table has the
     // `splits: grouped` option
   },

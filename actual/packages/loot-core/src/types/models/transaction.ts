@@ -36,4 +36,8 @@ export type TransactionEntity = {
   } | null;
   raw_synced_data?: string | undefined;
   _ruleErrors?: string[];
+  // M2 anomaly detection fields (added by migration 1776000000001)
+  anomaly_score?: number | null;
+  anomaly_flags?: string | null;  // JSON: {duplicate_within_24h, subscription_jump, amount_spike}
+  anomaly_dismissed?: number | null;  // 0 = active, 1 = dismissed
 };

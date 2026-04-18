@@ -34,6 +34,7 @@ import {
   SvgCheveronDown,
 } from '@actual-app/components/icons/v1';
 import {
+  SvgAlertTriangle,
   SvgArrowsSynchronize,
   SvgCalendar3,
   SvgHyperlink2,
@@ -487,6 +488,85 @@ function HeaderCell({
   );
 }
 
+type AnomalyBadgeProps = {
+  transaction: SerializedTransaction;
+  onDismiss: () => void;
+};
+
+function AnomalyBadge({ transaction, onDismiss }: AnomalyBadgeProps) {
+  const { t } = useTranslation();
+
+  if (
+    transaction.anomaly_score == null ||
+    transaction.anomaly_dismissed === 1
+  ) {
+    return null;
+  }
+
+  let flags: { duplicate_within_24h?: boolean; subscription_jump?: boolean; amount_spike?: boolean } = {};
+  try {
+    if (transaction.anomaly_flags) {
+      flags = JSON.parse(transaction.anomaly_flags);
+    }
+  } catch {
+    // malformed JSON — treat as generic anomaly
+  }
+
+  const isAnomaly =
+    flags.duplicate_within_24h || flags.subscription_jump || flags.amount_spike;
+  if (!isAnomaly) return null;
+
+  let label = t('Unusual transaction');
+  if (flags.duplicate_within_24h) label = t('Possible duplicate');
+  else if (flags.subscription_jump) label = t('Subscription price jump');
+  else if (flags.amount_spike) label = t('Unusual amount');
+
+  return (
+    <Tooltip
+      content={
+        <View style={{ padding: '6px 10px' }}>
+          <Text style={{ fontWeight: 'bold', color: theme.warningText }}>
+            {label}
+          </Text>
+          <Text style={{ color: theme.pageTextSubdued, marginTop: 2, fontSize: 12 }}>
+            <Trans>Click × to dismiss</Trans>
+          </Text>
+        </View>
+      }
+      style={styles.tooltip}
+      placement="bottom"
+      triggerProps={{ delay: 400 }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          marginRight: 4,
+          flexShrink: 0,
+        }}
+      >
+        <SvgAlertTriangle
+          style={{ color: theme.warningText, width: 13, height: 13 }}
+        />
+        <Button
+          variant="bare"
+          style={{
+            padding: '0 2px',
+            minWidth: 0,
+            color: theme.pageTextSubdued,
+            fontSize: 11,
+            lineHeight: '13px',
+          }}
+          onPress={() => onDismiss()}
+          aria-label={t('Dismiss anomaly warning')}
+        >
+          ×
+        </Button>
+      </View>
+    </Tooltip>
+  );
+}
+
 type PayeeCellProps = {
   id: TransactionEntity['id'];
   payee?: PayeeEntity;
@@ -687,6 +767,7 @@ function PayeeCell({
                 textOverflow: 'ellipsis',
                 display: 'flex',
                 alignItems: 'center',
+                flex: 1,
               }}
             >
               {importedPayee ? (
@@ -711,6 +792,10 @@ function PayeeCell({
                 payeeName
               )}
             </div>
+            <AnomalyBadge
+              transaction={transaction}
+              onDismiss={() => onUpdate('anomaly_dismissed', 1)}
+            />
           </>
         );
       }}

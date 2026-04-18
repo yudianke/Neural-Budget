@@ -4,7 +4,7 @@ import tempfile
 
 import requests
 
-TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.243:8000/")
+TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000/")
 LOGGED_MODEL_ID = os.environ.get("M1_LOGGED_MODEL_ID", "m-020c83518f0545d0897fa9d3ed50bfb3")
 
 
