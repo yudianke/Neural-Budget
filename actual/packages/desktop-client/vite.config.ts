@@ -162,6 +162,13 @@ export default defineConfig(async ({ mode }) => {
       watch: {
         disableGlobbing: false,
       },
+      proxy: {
+        '/ml-api': {
+          target: env.M1_SERVICE_URL || 'http://129.114.26.3:8001',
+          changeOrigin: true,
+          rewrite: (p: string) => p.replace(/^\/ml-api/, ''),
+        },
+      },
     },
     resolve: {
       ...(!env.IS_GENERIC_BROWSER && {
@@ -170,8 +177,10 @@ export default defineConfig(async ({ mode }) => {
       tsconfigPaths: true,
     },
     plugins: [
-      // electron (desktop) builds do not support PWA
-      mode === 'desktop'
+      // Disable PWA during local dev. The dev service worker causes Vite to
+      // re-optimize workbox deps and occasionally request stale .vite chunks,
+      // which leaves the Docker-based browser client on a blank page.
+      mode === 'desktop' || mode === 'development'
         ? undefined
         : VitePWA({
             registerType: 'prompt',
@@ -193,7 +202,7 @@ export default defineConfig(async ({ mode }) => {
             //   swSrc: `service-worker/plugin-sw.js`,
             // },
             devOptions: {
-              enabled: true, // We need service worker in dev mode to work with plugins
+              enabled: false,
               type: 'module',
             },
             workbox: {
