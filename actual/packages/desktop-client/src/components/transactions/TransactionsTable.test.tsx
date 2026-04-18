@@ -20,7 +20,7 @@ import type {
   PayeeEntity,
   TransactionEntity,
 } from '@actual-app/core/types/models';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { format as formatDate, parse as parseDate } from 'date-fns';
 import { v4 as uuidv4 } from 'uuid';
@@ -139,6 +139,10 @@ type LiveTransactionTableProps = {
   showCategory: boolean;
   showCleared: boolean;
   isAdding: boolean;
+  onApplyRules?: (
+    transaction: TransactionEntity,
+    field: string | null,
+  ) => Promise<TransactionEntity>;
   onTransactionsChange?: (newTrans: TransactionEntity[]) => void;
   onCloseAddTransaction?: () => void;
 };
@@ -201,6 +205,7 @@ function LiveTransactionTable(props: LiveTransactionTableProps) {
                   payees={payees}
                   addNotification={console.log}
                   onSave={onSave}
+                  onApplyRules={props.onApplyRules ?? (async t => t)}
                   onSplit={onSplit}
                   onAdd={onAdd}
                   onAddSplit={onAddSplit}
@@ -1060,6 +1065,47 @@ describe('Transactions', () => {
     expect(container.querySelector('[data-testid="new-transaction"]')).toBe(
       null,
     );
+  });
+
+  test('clicking add immediately after typing saves amount value', async () => {
+    const { container, getTransactions, updateProps } = renderTransactions();
+
+    expect(getTransactions().length).toBe(5);
+    updateProps({ isAdding: true });
+
+    const input = await editNewField(container, 'debit');
+    await userEvent.clear(input);
+    await userEvent.type(input, '42.15');
+
+    const addButton = container.querySelector('[data-testid="add-button"]')!;
+    fireEvent.click(addButton);
+
+    await waitFor(() => expect(getTransactions().length).toBe(6));
+    expect(getTransactions()[0].amount).toBe(-4215);
+  });
+
+  test('clicking add immediately after rules auto-fill saves category', async () => {
+    const autoCategoryId = usualGroup.categories?.[1].id;
+    const { container, getTransactions, updateProps } = renderTransactions({
+      onApplyRules: async transaction => ({
+        ...transaction,
+        category: autoCategoryId,
+      }),
+    });
+
+    expect(getTransactions().length).toBe(5);
+    updateProps({ isAdding: true });
+
+    const input = await editNewField(container, 'debit');
+    await userEvent.clear(input);
+    await userEvent.type(input, '12.00');
+
+    const addButton = container.querySelector('[data-testid="add-button"]')!;
+    fireEvent.click(addButton);
+
+    await waitFor(() => expect(getTransactions().length).toBe(6));
+    expect(getTransactions()[0].category).toBe(autoCategoryId);
+    expect(getTransactions()[0].amount).toBe(-1200);
   });
 
   test('transaction can be selected', async () => {

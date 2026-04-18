@@ -15,6 +15,7 @@ import type {
 import { exportQueryToCSV, exportToCSV } from './export/export-to-csv';
 import { parseFile } from './import/parse-file';
 import type { ParseFileOptions } from './import/parse-file';
+import { logM1FeedbackBatch } from './ml-service';
 import { mergeTransactions } from './merge';
 
 import { batchUpdateTransactions } from '.';
@@ -24,6 +25,7 @@ export type TransactionHandlers = {
   'transaction-add': typeof addTransaction;
   'transaction-update': typeof updateTransaction;
   'transaction-delete': typeof deleteTransaction;
+  'm1-feedback-log-batch': typeof handleM1FeedbackLogBatch;
   'transaction-move': typeof moveTransaction;
   'transactions-parse-file': typeof parseTransactionsFile;
   'transactions-export': typeof exportTransactions;
@@ -64,6 +66,14 @@ async function updateTransaction(transaction: TransactionEntity) {
 async function deleteTransaction(transaction: Pick<TransactionEntity, 'id'>) {
   await handleBatchUpdateTransactions({ deleted: [transaction] });
   return {};
+}
+
+async function handleM1FeedbackLogBatch({
+  entries,
+}: {
+  entries: Parameters<typeof logM1FeedbackBatch>[0];
+}) {
+  return logM1FeedbackBatch(entries);
 }
 
 async function moveTransaction({
@@ -161,6 +171,7 @@ app.method('transactions-merge', mutator(undoable(mergeTransactions)));
 app.method('transaction-add', mutator(addTransaction));
 app.method('transaction-update', mutator(updateTransaction));
 app.method('transaction-delete', mutator(deleteTransaction));
+app.method('m1-feedback-log-batch', mutator(handleM1FeedbackLogBatch));
 app.method('transaction-move', mutator(undoable(moveTransaction)));
 app.method('transactions-parse-file', mutator(parseTransactionsFile));
 app.method('transactions-export', mutator(exportTransactions));

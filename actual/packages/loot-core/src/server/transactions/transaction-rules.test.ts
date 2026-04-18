@@ -17,6 +17,7 @@ import {
   updateCategoryRules,
   updateRule,
 } from './transaction-rules';
+import * as mlService from './ml-service';
 
 // TODO: write tests to make sure payee renaming is "pre" and category
 // setting is "null" stage
@@ -359,13 +360,54 @@ describe('Transaction rules', () => {
         date: '2020-08-11',
         amount: 50,
       }),
-    ).toEqual({
+    ).toMatchObject({
       date: '2020-08-11',
       imported_payee: '123 kroger',
       payee: 'kroger4',
       amount: 50,
       notes: 'got it2',
     });
+  });
+
+  test('runRules resolves temporary new payees before ML categorization', async () => {
+    const categoryGroupId = await db.insertCategoryGroup({ name: 'general' });
+    const foodCategoryId = await db.insertCategory({
+      id: 'food_id',
+      name: 'Food',
+      cat_group: categoryGroupId,
+    });
+
+    const predictSpy = vi
+      .spyOn(mlService, 'predictCategoryWithSuggestions')
+      .mockResolvedValue({
+        categoryId: foodCategoryId,
+        confidence: 0.92,
+        top3: [
+          {
+            category: 'food',
+            categoryId: foodCategoryId,
+            confidence: 0.92,
+          },
+        ],
+      });
+
+    const transaction = await runRules({
+      payee: 'new:Corner Coffee',
+      date: '2020-08-11',
+      amount: -500,
+      category: null,
+    });
+
+    expect(transaction.category).toBe(foodCategoryId);
+    expect(transaction.payee).not.toBe('new:Corner Coffee');
+
+    const createdPayee = await db.first<{ name: string }>(
+      'SELECT name FROM payees WHERE id = ?',
+      [transaction.payee],
+    );
+    expect(createdPayee?.name).toBe('Corner Coffee');
+
+    predictSpy.mockRestore();
   });
 
   test('transactions can be queried by rule', async () => {

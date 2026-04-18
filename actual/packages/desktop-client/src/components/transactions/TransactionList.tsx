@@ -5,7 +5,10 @@ import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { theme } from '@actual-app/components/theme';
-import { send } from '@actual-app/core/platform/client/connection';
+import {
+  send,
+  sendCatch,
+} from '@actual-app/core/platform/client/connection';
 import * as monthUtils from '@actual-app/core/shared/months';
 import { q } from '@actual-app/core/shared/query';
 import { getUpcomingDays } from '@actual-app/core/shared/schedules';
@@ -283,6 +286,38 @@ type TransactionListProps = Pick<
   onRefetch: () => void;
 };
 
+const EPHEMERAL_M1_FIELDS = new Set(['_mlConfidence', '_mlTop3', '_ruleErrors']);
+
+type M1FeedbackEntry = {
+  transaction_id: string;
+  date: string;
+  amount: number;
+  merchant: string;
+  imported_payee?: string;
+  predicted_category: string;
+  predicted_category_id?: string | null;
+  chosen_category: string;
+  chosen_category_id?: string | null;
+  confidence: number;
+  feedback_type: 'accepted' | 'overridden';
+  top_3_suggestions: Array<{
+    category: string;
+    confidence: number;
+  }>;
+  source: 'actual';
+};
+
+function stripEphemeralMlFields<T extends TransactionEntity>(transaction: T): T {
+  const cleaned = { ...transaction };
+  EPHEMERAL_M1_FIELDS.forEach(field => {
+    delete cleaned[field];
+  });
+  if (cleaned.subtransactions) {
+    cleaned.subtransactions = cleaned.subtransactions.map(stripEphemeralMlFields);
+  }
+  return cleaned;
+}
+
 export function TransactionList({
   tableRef,
   transactions,
@@ -333,11 +368,99 @@ export function TransactionList({
   const [upcomingLength = '7'] = useSyncedPref(
     'upcomingScheduledTransactionLength',
   );
+  const categoryNamesById = useRef<Record<string, string>>({});
+  const payeeNamesById = useRef<Record<string, string>>({});
+  useLayoutEffect(() => {
+    categoryNamesById.current = Object.fromEntries(
+      (categoryGroups || []).flatMap(group =>
+        (group.categories || []).map(cat => [cat.id, cat.name]),
+      ),
+    );
+    payeeNamesById.current = Object.fromEntries(
+      (payees || []).map(payee => [payee.id, payee.name]),
+    );
+  }, [categoryGroups, payees]);
 
   const transactionsLatest = useRef<readonly TransactionEntity[]>([]);
   useLayoutEffect(() => {
     transactionsLatest.current = transactions;
   }, [transactions]);
+
+  const logM1Feedback = useCallback((entries: M1FeedbackEntry[]) => {
+    if (!entries || entries.length === 0) {
+      return;
+    }
+    void sendCatch('m1-feedback-log-batch', { entries });
+  }, []);
+
+  const buildM1FeedbackEntries = useCallback(
+    (
+      txns: TransactionEntity[],
+      options: {
+        requireCategoryChange?: boolean;
+      } = {},
+    ) => {
+      return txns.flatMap(transaction => {
+        const top3 = transaction._mlTop3;
+        if (!top3 || top3.length === 0 || !transaction.category) {
+          return [];
+        }
+
+        const originalTransaction = transactionsLatest.current.find(
+          current => current.id === transaction.id,
+        );
+        if (
+          options.requireCategoryChange &&
+          (!originalTransaction ||
+            originalTransaction.category === transaction.category)
+        ) {
+          return [];
+        }
+
+        const chosenCategoryId = transaction.category;
+        const chosenCategory = categoryNamesById.current[chosenCategoryId] || '';
+        const predicted = top3[0];
+        const merchant =
+          transaction.imported_payee ||
+          (transaction.payee
+            ? payeeNamesById.current[transaction.payee as string]
+            : '') ||
+          '';
+
+        if (!chosenCategory || !merchant) {
+          return [];
+        }
+
+        const feedbackType =
+          predicted.categoryId === chosenCategoryId ||
+          predicted.category === chosenCategory
+            ? 'accepted'
+            : 'overridden';
+
+        const entry: M1FeedbackEntry = {
+          transaction_id: transaction.id,
+          date: transaction.date,
+          amount: transaction.amount / 100,
+          merchant,
+          imported_payee: transaction.imported_payee,
+          predicted_category: predicted.category,
+          predicted_category_id: predicted.categoryId,
+          chosen_category: chosenCategory,
+          chosen_category_id: chosenCategoryId,
+          confidence: transaction._mlConfidence ?? predicted.confidence ?? 0,
+          feedback_type: feedbackType,
+          top_3_suggestions: top3.map(suggestion => ({
+            category: suggestion.category,
+            confidence: suggestion.confidence,
+          })),
+          source: 'actual',
+        };
+
+        return [entry];
+      });
+    },
+    [],
+  );
 
   const promptToConvertToSchedule = useCallback(
     (
@@ -384,6 +507,41 @@ export function TransactionList({
     async (newTransactions: TransactionEntity[]) => {
       newTransactions = realizeTempTransactions(newTransactions);
 
+      // Run rules + ML categorization on each new parent transaction before saving.
+      newTransactions = await Promise.all(
+        newTransactions.map(async t => {
+          if (t.is_child) return t;
+          const hasTemporaryPayee =
+            typeof t.payee === 'string' && t.payee.startsWith('new:');
+          const afterRules = await send('rules-run', { transaction: t });
+          if (!afterRules) return t;
+          const result = { ...t };
+          // Copy ephemeral ML fields for UI display
+          result._mlConfidence = afterRules._mlConfidence;
+          result._mlTop3 = afterRules._mlTop3;
+          // Apply fields that were empty, including ML-predicted category
+          Object.keys(afterRules).forEach(field => {
+            if (EPHEMERAL_M1_FIELDS.has(field)) return;
+            if (field === 'payee' && hasTemporaryPayee) {
+              result[field] = afterRules[field];
+              return;
+            }
+            if (
+              result[field] == null ||
+              result[field] === '' ||
+              result[field] === 0 ||
+              result[field] === false
+            ) {
+              result[field] = afterRules[field];
+            }
+          });
+          return result;
+        }),
+      );
+
+      const feedbackEntries = buildM1FeedbackEntries(newTransactions);
+      const persistedTransactions = newTransactions.map(stripEphemeralMlFields);
+
       const parentTransaction = newTransactions.find(t => !t.is_child);
       const isLinkedToSchedule = !!parentTransaction?.schedule;
 
@@ -407,8 +565,9 @@ export function TransactionList({
             );
           },
           async () => {
+            logM1Feedback(feedbackEntries);
             await saveDiff(
-              { added: newTransactions },
+              { added: persistedTransactions },
               isLearnCategoriesEnabled,
             );
           },
@@ -416,18 +575,28 @@ export function TransactionList({
         return;
       }
 
-      await saveDiff({ added: newTransactions }, isLearnCategoriesEnabled);
+      logM1Feedback(feedbackEntries);
+      await saveDiff({ added: persistedTransactions }, isLearnCategoriesEnabled);
       onRefetch();
     },
-    [isLearnCategoriesEnabled, onRefetch, promptToConvertToSchedule],
+    [
+      buildM1FeedbackEntries,
+      isLearnCategoriesEnabled,
+      logM1Feedback,
+      onRefetch,
+      promptToConvertToSchedule,
+    ],
   );
 
   const onSave = useCallback(
     async (transaction: TransactionEntity) => {
       const saveTransaction = async () => {
+        logM1Feedback(
+          buildM1FeedbackEntries([transaction], { requireCategoryChange: true }),
+        );
         const changes = updateTransaction(
           transactionsLatest.current,
-          transaction,
+          stripEphemeralMlFields(transaction),
         );
         transactionsLatest.current = changes.data;
 
@@ -475,7 +644,14 @@ export function TransactionList({
 
       await saveTransaction();
     },
-    [isLearnCategoriesEnabled, onChange, onRefetch, promptToConvertToSchedule],
+    [
+      buildM1FeedbackEntries,
+      isLearnCategoriesEnabled,
+      logM1Feedback,
+      onChange,
+      onRefetch,
+      promptToConvertToSchedule,
+    ],
   );
 
   const onAddSplit = useCallback(
@@ -529,10 +705,18 @@ export function TransactionList({
       }
 
       const diff = getChangedValues(transaction, afterRules);
+      const hasTemporaryPayee =
+        typeof transaction.payee === 'string' &&
+        transaction.payee.startsWith('new:');
 
       const newTransaction: TransactionEntity = { ...transaction };
       if (diff) {
         Object.keys(diff).forEach(field => {
+          if (field === 'payee' && hasTemporaryPayee) {
+            newTransaction[field] = diff[field];
+            return;
+          }
+
           if (
             newTransaction[field] == null ||
             newTransaction[field] === '' ||
