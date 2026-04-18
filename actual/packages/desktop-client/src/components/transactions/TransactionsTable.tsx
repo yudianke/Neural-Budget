@@ -1779,7 +1779,7 @@ const Transaction = memo(function Transaction({
                   onSelect={onSave}
                   showHiddenCategories={showHiddenCategories}
                   mlSuggestions={
-                    !categoryId && originalTransaction._mlTop3
+                    originalTransaction._mlTop3
                       ? originalTransaction._mlTop3
                       : undefined
                   }

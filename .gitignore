@@ -7,6 +7,9 @@ training/m3/data/
 datasets/
 .venv/
 venv/
+.env
+.env.*
+!.env.example
 training/*/mlruns/
 .claude/
 __pycache__/
