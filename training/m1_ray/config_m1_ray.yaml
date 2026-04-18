@@ -1,6 +1,9 @@
 data_path: "/data/moneydata.csv"
+production_path: ""
 mlflow_tracking_uri: "http://129.114.27.243:8000"
 experiment_name: "m1-categorization-ray"
+registered_model_name: "m1-ray-categorization"
+quality_gate_macro_f1: 0.65
 
 tfidf:
   ngram_min: 1

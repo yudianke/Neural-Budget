@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import List
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict
 
 
 class M1Input(BaseModel):
@@ -28,3 +29,28 @@ class M1Output(BaseModel):
     predicted_category: str
     confidence: float
     top_3_suggestions: List[CategorySuggestion]
+
+
+class M1FeedbackEntry(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    transaction_id: str
+    date: str
+    amount: float
+    merchant: str
+    imported_payee: Optional[str] = None
+    predicted_category: str
+    predicted_category_id: Optional[str] = None
+    chosen_category: str
+    chosen_category_id: Optional[str] = None
+    confidence: float
+    feedback_type: Literal["accepted", "overridden"]
+    top_3_suggestions: List[CategorySuggestion] = []
+    source: str = "actual"
+    logged_at: Optional[str] = None
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
+
+
+class M1FeedbackBatch(BaseModel):
+    entries: List[M1FeedbackEntry]

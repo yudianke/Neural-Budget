@@ -36,4 +36,12 @@ export type TransactionEntity = {
   } | null;
   raw_synced_data?: string | undefined;
   _ruleErrors?: string[];
+  /** Ephemeral — set by the ML rules pipeline, never persisted to SQLite */
+  _mlConfidence?: number;
+  /** Ephemeral — top-3 ML suggestions returned alongside the winning category */
+  _mlTop3?: Array<{
+    category: string;
+    categoryId: string | null;
+    confidence: number;
+  }>;
 };

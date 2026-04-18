@@ -11,3 +11,10 @@ training/*/mlruns/
 .claude/
 __pycache__/
 *.pyc
+.DS_Store
+.playwright-mcp/
+opencode.json
+actual/packages/sync-server/*.sqlite
+/actual/packages/desktop-client/public/kcab 2
+/actual/packages/desktop-client/public/kcab 3
+/actual/packages/desktop-client/service-worker 2
