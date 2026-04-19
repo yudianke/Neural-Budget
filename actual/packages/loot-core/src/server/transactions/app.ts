@@ -1,5 +1,6 @@
 import {createApp} from '#server/app';
 import {aqlQuery} from '#server/aql';
+import { exportMonthlyCategoryHistory } from '../forecast/export-monthly-history';
 
 import * as sheet from '../sheet';
 import * as monthUtils from '#shared/months';
@@ -35,7 +36,16 @@ export type TransactionHandlers = {
   'get-earliest-transaction': typeof getEarliestTransaction;
   'get-latest-transaction': typeof getLatestTransaction;
   'forecast-get-category-predictions': typeof getCategoryPredictions;
+  'forecast-export-monthly-history': typeof exportForecastMonthlyHistory;
 };
+
+async function exportForecastMonthlyHistory() {
+  const prefs = await import('#server/prefs');
+  const currentPrefs = prefs.getPrefs() || {};
+  const budgetId = currentPrefs.id || 'unknown-budget';
+
+  return exportMonthlyCategoryHistory(budgetId);
+}
 
 async function handleBatchUpdateTransactions({
                                                added,
@@ -447,3 +457,4 @@ app.method('transactions-export-query', mutator(exportTransactionsQuery));
 app.method('get-earliest-transaction', getEarliestTransaction);
 app.method('get-latest-transaction', getLatestTransaction);
 app.method('forecast-get-category-predictions', getCategoryPredictions);
+app.method('forecast-export-monthly-history', exportForecastMonthlyHistory);
