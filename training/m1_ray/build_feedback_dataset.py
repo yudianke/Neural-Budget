@@ -71,14 +71,19 @@ def main():
 
     out = df[keep].rename(columns={"chosen_category": "category"}).copy()
     out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    # Fall back to logged_at if date is missing, then today as last resort
-    if "logged_at" in out.columns:
-        fallback = pd.to_datetime(out["logged_at"], errors="coerce")
-        out["date"] = out["date"].fillna(fallback)
-    out["date"] = out["date"].fillna(pd.Timestamp.now())
     out["merchant"] = out["merchant"].astype(str).str.strip()
     out["category"] = out["category"].astype(str).str.strip()
-    out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(-10.0)
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce")
+
+    # Drop rows missing date or amount — fabricating these fields is worse than
+    # losing the row, because oversampling would amplify fabricated values into
+    # the training set. Real feedback from ActualBudget always includes both.
+    n_before = len(out)
+    out = out.dropna(subset=["date", "amount"])
+    n_dropped = n_before - len(out)
+    if n_dropped > 0:
+        print(f"Dropped {n_dropped} rows missing date or amount (incomplete feedback entries)")
+
     out = out[(out["merchant"] != "") & (out["category"] != "")]
     out = out.sort_values("logged_at", kind="stable").drop_duplicates(
         subset=["date", "merchant", "amount", "category", "feedback_type"],

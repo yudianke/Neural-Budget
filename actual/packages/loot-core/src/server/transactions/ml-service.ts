@@ -60,6 +60,8 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
   education: ['bills (flexible)', 'general'],
   charity: ['general'],
   'personal care': ['general', 'food'],
+  'cash transfers': ['general'],
+  cash_transfers: ['general'],
   misc: ['general'],
   // Ray model label aliases
   amazon: ['shopping', 'general'],

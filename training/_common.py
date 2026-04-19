@@ -75,12 +75,92 @@ def get_latest_production_metric(model_name, metric_name):
         return None, None
 
 
-def should_register(mode, current_metric, previous_metric, higher_is_better, absolute_gate_passed, prefix="M"):
+def get_per_category_f1_from_run(client, model_name: str) -> dict:
+    """Return all f1_{category} metrics from the latest registered version's run.
+
+    Used by the per-category regression gate in train_m1_ray.py to compare
+    current per-class F1 scores against those of the currently-serving model.
+
+    Returns an empty dict if no registered version exists or MLflow is unreachable.
+    """
+    try:
+        versions = client.search_model_versions(f"name='{model_name}'")
+        if not versions:
+            return {}
+        latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+        run = client.get_run(latest.run_id)
+        return {k: v for k, v in run.data.metrics.items() if k.startswith("f1_")}
+    except Exception as e:
+        print(f"[WARN] could not fetch per-category F1 for {model_name}: {e}")
+        return {}
+
+
+def check_category_regression(
+    report: dict,
+    prev_per_cat_f1: dict,
+    regression_threshold: float = 0.02,
+) -> tuple[bool, list[str]]:
+    """Check whether any category regressed more than regression_threshold (relative).
+
+    Args:
+        report:              classification_report output_dict from sklearn.
+        prev_per_cat_f1:     dict of {f1_{category}: float} from the previous model run.
+        regression_threshold: max allowed relative F1 drop (default 0.02 = 2%).
+
+    Returns:
+        (gate_passed: bool, regressed_categories: list[str])
+        gate_passed is True if no category regressed beyond threshold.
+        regressed_categories lists "<category>:prev->{curr}" strings for logging.
+    """
+    if not prev_per_cat_f1:
+        # No previous per-category data — pass gate (first version or MLflow unavailable)
+        return True, []
+
+    regressed = []
+    for cat, metrics in report.items():
+        if not isinstance(metrics, dict):
+            continue
+        safe = cat.replace(" ", "_").replace("/", "_")
+        curr_f1 = metrics.get("f1-score", 0.0)
+        prev_f1 = prev_per_cat_f1.get(f"f1_{safe}")
+
+        if prev_f1 is None or prev_f1 <= 0:
+            continue  # category not in previous model — skip
+
+        # Relative regression: how much did F1 drop as a fraction of the previous value?
+        relative_drop = (prev_f1 - curr_f1) / prev_f1
+        if relative_drop > regression_threshold:
+            regressed.append(
+                f"{cat}:prev={prev_f1:.3f}->curr={curr_f1:.3f}"
+                f"(drop={relative_drop:.1%})"
+            )
+
+    return len(regressed) == 0, regressed
+
+
+def should_register(
+    mode,
+    current_metric,
+    previous_metric,
+    higher_is_better,
+    absolute_gate_passed,
+    category_gate_passed=True,
+    prefix="M",
+):
     """Decide whether to register a new model version.
+
+    Gates (in order):
+      1. absolute_gate_passed  — current metric meets the floor threshold
+      2. category_gate_passed  — no top-20 category regressed > 2% (relative)
+      3. global improvement    — current metric beats the previous registered version
+
     Returns (should_register: bool, reason: str).
     """
     if not absolute_gate_passed:
         return False, f"absolute gate failed (current={current_metric:.4f})"
+
+    if not category_gate_passed:
+        return False, "per-category regression gate failed (>2% relative drop in ≥1 category)"
 
     if previous_metric is None:
         return True, f"no previous version, registering (current={current_metric:.4f})"

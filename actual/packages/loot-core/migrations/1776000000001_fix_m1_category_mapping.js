@@ -22,6 +22,7 @@ const M1_CATEGORY_NAMES = [
   'Education',
   'Charity',
   'Personal Care',
+  'Cash Transfers',
   'Misc',
 ];
 

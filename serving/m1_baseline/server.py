@@ -111,6 +111,12 @@ app.add_middleware(CrossOriginMiddleware)
 def health():
     if not _model_ready:
         return {"status": "loading"}
+    if real_model._use_fallback and real_model._fallback_mode == "degraded":
+        return {
+            "status": "degraded",
+            "model_version": None,
+            "reason": "MLflow unreachable or model load failed — serving null predictions",
+        }
     return {"status": "ok", "model_version": real_model._model_version}
 
 

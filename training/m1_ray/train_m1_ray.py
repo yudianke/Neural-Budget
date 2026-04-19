@@ -26,7 +26,9 @@ from scipy.sparse import csr_matrix, hstack
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from _common import (  # noqa: E402
+    check_category_regression,
     get_latest_production_metric,
+    get_per_category_f1_from_run,
     load_config,
     log as _log,
     register_model_version,
@@ -417,10 +419,25 @@ def main():
                     mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
 
                 absolute_passed = macro_f1 >= quality_gate
+                client_for_gate = MlflowClient()
                 prev_version, prev_metric = get_latest_production_metric(
                     registered_model_name, "macro_f1"
                 )
                 log(f"previous version: v{prev_version} macro_f1={prev_metric}")
+
+                # --- Per-category regression gate (AGENTS.md: < 2% relative drop) ---
+                prev_per_cat_f1 = get_per_category_f1_from_run(
+                    client_for_gate, registered_model_name
+                )
+                category_gate_passed, regressed_cats = check_category_regression(
+                    report=report,
+                    prev_per_cat_f1=prev_per_cat_f1,
+                    regression_threshold=0.02,
+                )
+                if not category_gate_passed:
+                    log(f"CATEGORY REGRESSION GATE FAILED: {regressed_cats}")
+                else:
+                    log(f"category regression gate passed (checked {len(prev_per_cat_f1)} categories)")
 
                 do_register, reason = should_register(
                     mode=args.mode,
@@ -428,11 +445,17 @@ def main():
                     previous_metric=prev_metric,
                     higher_is_better=True,
                     absolute_gate_passed=absolute_passed,
+                    category_gate_passed=category_gate_passed,
                     prefix="M1-RAY",
                 )
 
                 mlflow.set_tag("quality_gate_metric", "macro_f1")
                 mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
+                mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
+                mlflow.set_tag(
+                    "regressed_categories",
+                    ",".join(regressed_cats) if regressed_cats else "none",
+                )
                 mlflow.set_tag("registered", str(do_register).lower())
                 mlflow.set_tag("register_reason", reason)
                 mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")

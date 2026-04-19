@@ -14,11 +14,11 @@ import xgboost as xgb
 from mlflow.tracking import MlflowClient
 from scipy.sparse import csr_matrix, hstack
 
-import mock_model
 from schemas import CategorySuggestion, M1FeedbackEntry, M1Input, M1Output
 
 TEXT_COL = "merchant"
 NUMERIC_COLS = ["log_amount", "day_of_week", "day_of_month"]
+CONFIDENCE_THRESHOLD = 0.6  # auto_fill if confidence >= this value
 
 # Maps Ray model output labels → project dataset categories (moneydata_labeled.csv)
 CATEGORY_MAP: dict[str, str] = {
@@ -119,24 +119,34 @@ def _tracking_reachable(tracking_uri: str) -> bool:
 
 
 def load():
+    """Load the Ray XGBoost bundle from MLflow.
+
+    Fail-open policy:
+      - If MLflow is unreachable or model load fails, the service stays up
+        but enters 'degraded' mode: predictions return null/zero rather than
+        serving garbage from a mock or schema-divergent fallback model.
+      - /health reports {"status": "degraded"} so monitoring can alert.
+      - No sklearn fallback, no mock fallback — wrong predictions are worse
+        than no predictions for feedback quality and retraining integrity.
+    """
     global _booster, _label_encoder, _tfidf, _metadata, _model_version, _pipeline, _use_fallback, _fallback_mode
 
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_TRACKING_URI)
     model_name = os.environ.get("M1_REGISTERED_MODEL_NAME", DEFAULT_MODEL_NAME)
+
     if not _tracking_reachable(tracking_uri):
         _use_fallback = True
-        _fallback_mode = "mock"
-        _model_version = "mock"
-        _pipeline = None
+        _fallback_mode = "degraded"
+        _model_version = None
         _booster = None
         _tfidf = None
         _label_encoder = None
-        print(f"[M1] Tracking host {tracking_uri} unreachable, using local mock fallback")
+        _pipeline = None
+        print(f"[M1] WARNING: MLflow at {tracking_uri} unreachable — entering degraded mode (no predictions)")
         return None, None
 
     mlflow.set_tracking_uri(tracking_uri)
 
-    # Try loading the Ray XGBoost bundle first
     try:
         client = MlflowClient(tracking_uri=tracking_uri)
         version = _select_model_version(client, model_name)
@@ -156,31 +166,33 @@ def load():
         _label_encoder = joblib.load(label_encoder_path)
         _booster = xgb.Booster()
         _booster.load_model(str(model_path))
+
+        # Ray Train's XGBoostTrainer saves the model with multi:softmax regardless
+        # of the objective passed in params. Re-set to multi:softprob so predict()
+        # returns a full [n_samples, n_classes] probability matrix instead of a
+        # 1D class-index array. The underlying weights are identical — only the
+        # output interpretation changes.
+        _booster.set_param("objective", "multi:softprob")
+        _booster.set_param("num_class", str(len(_label_encoder.classes_)))
+
         _model_version = str(version.version)
         _use_fallback = False
         _fallback_mode = None
-        print(f"[M1] Loaded Ray model '{model_name}' version {_model_version}")
+        print(f"[M1] Loaded Ray model '{model_name}' version {_model_version} (softprob mode)")
         return _booster, _label_encoder
 
     except Exception as e:
-        print(f"[M1] Ray model load failed ({e}), trying fallback sklearn pipeline...")
-
-    # Fallback: load original sklearn pipeline (m1-categorization)
-    import mlflow.sklearn as mlflow_sklearn
-    try:
-        _pipeline = mlflow_sklearn.load_model(f"models:/{FALLBACK_MODEL_NAME}/latest")
-    except Exception:
-        _pipeline = mlflow_sklearn.load_model("models:/m1-categorization/7")
-
-    # Build label encoder from pipeline classes
-    from sklearn.preprocessing import LabelEncoder
-    _label_encoder = LabelEncoder()
-    _label_encoder.classes_ = _pipeline.classes_
-    _use_fallback = True
-    _fallback_mode = "sklearn"
-    _model_version = "fallback-sklearn"
-    print(f"[M1] Loaded fallback sklearn pipeline '{FALLBACK_MODEL_NAME}'")
-    return _pipeline, _label_encoder
+        # Model load failed — enter degraded mode rather than serving a
+        # schema-divergent fallback that would contaminate the feedback log.
+        _use_fallback = True
+        _fallback_mode = "degraded"
+        _model_version = None
+        _booster = None
+        _tfidf = None
+        _label_encoder = None
+        _pipeline = None
+        print(f"[M1] WARNING: Model load failed ({e}) — entering degraded mode (no predictions)")
+        return None, None
 
 
 def get_model_info():
@@ -208,6 +220,11 @@ def _build_row(x: M1Input) -> tuple[pd.DataFrame, str]:
 
 
 def _predict_proba(row: pd.DataFrame) -> np.ndarray:
+    """Return a probability vector over all classes for a single input row.
+
+    With multi:softprob (set in load()), XGBoost returns shape [1, n_classes]
+    — a proper probability distribution that sums to 1.
+    """
     text_vec = _tfidf.transform(row[TEXT_COL].astype(str))
     num_vec = csr_matrix(row[NUMERIC_COLS].values.astype(float))
     features = hstack([text_vec, num_vec]).toarray()
@@ -215,88 +232,38 @@ def _predict_proba(row: pd.DataFrame) -> np.ndarray:
     dmatrix = xgb.DMatrix(features, feature_names=feature_names)
     pred = _booster.predict(dmatrix)
 
-    # If model was trained with multi:softmax it returns class indices (shape [n]),
-    # not a probability vector. Re-predict with output_margin=True to get raw
-    # decision margins, then build a pseudo-probability vector that:
-    #   - Puts the winning class (from pred) at rank 1 with confidence 0.85
-    #   - Distributes remaining 0.15 across runner-ups ranked by margin score
-    # This gives meaningful top-3 without misrepresenting model confidence.
-    if pred.ndim == 1 and pred.shape[0] == 1:
-        winner_idx = int(pred[0])
-        n_classes = len(_label_encoder.classes_)
-        margins = _booster.predict(dmatrix, output_margin=True)
+    if pred.ndim == 2:
+        return pred[0]   # [n_classes] — standard softprob output
+    return pred          # defensive: already [n_classes]
 
-        if margins.ndim == 2 and margins.shape[1] == n_classes:
-            # Build rank order by margins, but force winner to top
-            margin_order = np.argsort(margins[0])[::-1].tolist()
-            if winner_idx in margin_order:
-                margin_order.remove(winner_idx)
-            ranked = [winner_idx] + margin_order
 
-            # Assign pseudo-probabilities: winner=0.85, runner-ups share 0.15
-            proba = np.zeros(n_classes, dtype=float)
-            proba[winner_idx] = 0.85
-            if len(ranked) > 1:
-                runner_up_share = 0.15 / min(2, len(ranked) - 1)
-                for idx in ranked[1:3]:
-                    proba[idx] = runner_up_share
-            return proba
-        else:
-            # Fallback: only winner known
-            proba = np.zeros(n_classes, dtype=float)
-            proba[winner_idx] = 1.0
-            return proba
-
-    if pred.ndim == 1:
-        pred = pred.reshape(-1, 1)
-    return pred[0]
+def _null_prediction(x: M1Input) -> M1Output:
+    """Return a no-prediction response when the model is in degraded mode.
+    Callers should check confidence == 0 to detect this case.
+    """
+    return M1Output(
+        transaction_id=x.transaction_id,
+        synthetic_user_id=x.synthetic_user_id,
+        predicted_category="",
+        confidence=0.0,
+        top_3_suggestions=[],
+        auto_fill=False,
+    )
 
 
 def predict(x: M1Input) -> M1Output:
-    if _use_fallback and _fallback_mode == "mock":
-        return mock_model.predict_category(x)
+    # Degraded mode — return null prediction rather than serving garbage.
+    # Service stays up; /health reports "degraded".
+    if _use_fallback and _fallback_mode == "degraded":
+        return _null_prediction(x)
 
-    if _label_encoder is None:
-        raise RuntimeError("Model not loaded. Call real_model.load() at startup.")
-
-    # Fallback path: use sklearn pipeline directly
-    if _use_fallback:
-        row, _ = _build_row(x)
-        proba = _pipeline.predict_proba(row)[0]
-        classes = _pipeline.classes_
-        order = proba.argsort()[::-1]
-        top3 = [
-            CategorySuggestion(
-                category=map_category(str(classes[i])),
-                confidence=float(proba[i]),
-            )
-            for i in order[:3]
-        ]
-        predicted = top3[0].category
-        confidence = top3[0].confidence
-        auto_fill = confidence >= 0.6
-        return M1Output(
-            transaction_id=x.transaction_id,
-            synthetic_user_id=x.synthetic_user_id,
-            predicted_category=predicted,
-            confidence=confidence,
-            top_3_suggestions=top3,
-        )
-
-    if _booster is None or _tfidf is None:
-        raise RuntimeError("Ray model not loaded.")
+    if _booster is None or _tfidf is None or _label_encoder is None:
+        # Should not happen if load() was called at startup, but guard defensively.
+        return _null_prediction(x)
 
     row, _merchant_clean = _build_row(x)
-    pred = _predict_proba(row)
-
-    if pred.shape[0] == len(_label_encoder.classes_):
-        proba = pred.astype(float)
-        order = np.argsort(proba)[::-1]
-    else:
-        predicted_idx = int(pred[0])
-        proba = np.zeros(len(_label_encoder.classes_), dtype=float)
-        proba[predicted_idx] = 1.0
-        order = np.array([predicted_idx])
+    proba = _predict_proba(row).astype(float)  # always [n_classes] with softprob
+    order = np.argsort(proba)[::-1]
 
     top_indices = order[: min(3, len(order))]
     top3 = [
@@ -308,6 +275,7 @@ def predict(x: M1Input) -> M1Output:
     ]
     predicted = top3[0].category
     confidence = top3[0].confidence
+    auto_fill = confidence >= CONFIDENCE_THRESHOLD
 
     return M1Output(
         transaction_id=x.transaction_id,
@@ -315,6 +283,7 @@ def predict(x: M1Input) -> M1Output:
         predicted_category=predicted,
         confidence=confidence,
         top_3_suggestions=top3,
+        auto_fill=auto_fill,
     )
 
 

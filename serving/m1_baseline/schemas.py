@@ -29,6 +29,7 @@ class M1Output(BaseModel):
     predicted_category: str
     confidence: float
     top_3_suggestions: List[CategorySuggestion]
+    auto_fill: bool = False
 
 
 class M1FeedbackEntry(BaseModel):
