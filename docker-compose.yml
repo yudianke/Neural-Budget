@@ -201,9 +201,10 @@ services:
       CHECK_INTERVAL_SECONDS: "${CHECK_INTERVAL_SECONDS:-3600}"
       M3_FORCE_RETRAIN: "${M3_FORCE_RETRAIN:-}"
       M3_FORCE_EVAL: "${M3_FORCE_EVAL:-}"
-      # Set to an actuals endpoint for production-quality rollback.
-      # Without it, daemon falls back to MLflow training-eval MAE automatically.
-      M3_ACTUALS_URL: "${M3_ACTUALS_URL:-}"
+      # Actuals endpoint — Vite dev server middleware exposes real monthly spend
+      # per category from budget SQLite files. M3 daemon calls this to compute
+      # production MAE and trigger automatic rollback when quality degrades.
+      M3_ACTUALS_URL: "${M3_ACTUALS_URL:-http://actual-development:3001/api/ml/actuals?months=12}"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
       MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
