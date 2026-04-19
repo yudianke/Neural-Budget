@@ -46,7 +46,13 @@ from pydantic import BaseModel, ConfigDict
 # ---------------------------------------------------------------------------
 CONTAMINATION = float(os.environ.get("M2_CONTAMINATION", "0.05"))
 DEFAULT_FEEDBACK_LOG_PATH = "/data/feedback/m2_feedback.jsonl"
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
+# Committed model.onnx — used as fallback when MLflow is unreachable
+FALLBACK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
+# MLflow config
+DEFAULT_MLFLOW_URI = "http://129.114.27.211:8000"
+DEFAULT_MODEL_NAME = "m2-anomaly"
+# Number of input features (must match training)
+N_FEATURES = 6
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,17 +69,123 @@ _model_lock = threading.Lock()
 _session: Optional[ort.InferenceSession] = None
 _input_name: str = ""
 _model_version: str = "m2_isolation_forest_v1"
+_use_fallback: bool = False  # True when using committed model.onnx, not MLflow
 
 
-def _load_model(path: Optional[str] = None) -> None:
-    global _session, _input_name, _model_version
-    target = path or MODEL_PATH
-    sess = ort.InferenceSession(target, providers=["CPUExecutionProvider"])
+def _mlflow_reachable(uri: str) -> bool:
+    """Quick TCP-level reachability check (2s timeout)."""
+    from urllib.error import URLError
+    from urllib.request import urlopen
+    try:
+        with urlopen(uri, timeout=2):
+            return True
+    except (URLError, TimeoutError, OSError):
+        return False
+
+
+def _sklearn_to_onnx_bytes(pipeline) -> bytes:
+    """Convert a fitted sklearn Pipeline to ONNX bytes in memory."""
+    from skl2onnx import convert_sklearn
+    from skl2onnx.common.data_types import FloatTensorType
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        onnx_model = convert_sklearn(
+            pipeline,
+            name="m2_anomaly_pipeline",
+            initial_types=[("float_input", FloatTensorType([None, N_FEATURES]))],
+            target_opset={"": 17, "ai.onnx.ml": 3},
+        )
+    return onnx_model.SerializeToString()
+
+
+def _load_from_mlflow() -> Optional[str]:
+    """Download latest M2 model from MLflow registry, convert to ONNX, return version string.
+
+    Returns the version string on success, None on failure.
+    Fail-open: any exception is caught and logged — caller falls back to disk model.
+    """
+    import mlflow
+    import mlflow.sklearn
+    from mlflow.tracking import MlflowClient
+
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_URI)
+    model_name = os.environ.get("M2_REGISTERED_MODEL_NAME", DEFAULT_MODEL_NAME)
+
+    if not _mlflow_reachable(tracking_uri):
+        log.warning(f"MLflow at {tracking_uri} unreachable — skipping MLflow pull")
+        return None
+
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+        versions = client.search_model_versions(f"name='{model_name}'")
+        if not versions:
+            log.warning(f"No registered versions found for '{model_name}' — using fallback")
+            return None
+
+        latest = max(versions, key=lambda v: int(v.version))
+        log.info(f"MLflow: found '{model_name}' v{latest.version} (run_id={latest.run_id})")
+
+        model_uri = f"runs:/{latest.run_id}/model"
+        log.info(f"Downloading model from {model_uri} ...")
+        pipeline = mlflow.sklearn.load_model(model_uri)
+
+        log.info("Converting sklearn Pipeline to ONNX in memory ...")
+        onnx_bytes = _sklearn_to_onnx_bytes(pipeline)
+
+        sess = ort.InferenceSession(onnx_bytes, providers=["CPUExecutionProvider"])
+        inp_name = sess.get_inputs()[0].name
+        version_str = f"m2_isolation_forest_v{latest.version}"
+
+        with _model_lock:
+            global _session, _input_name, _model_version, _use_fallback
+            _session = sess
+            _input_name = inp_name
+            _model_version = version_str
+            _use_fallback = False
+
+        log.info(f"Loaded MLflow model '{model_name}' version {latest.version}")
+        return version_str
+
+    except Exception as exc:
+        log.warning(f"MLflow model load failed ({exc}) — falling back to disk model")
+        return None
+
+
+def _load_fallback() -> None:
+    """Load the committed model.onnx from disk. Always succeeds or raises hard."""
+    global _session, _input_name, _use_fallback
+    sess = ort.InferenceSession(FALLBACK_MODEL_PATH, providers=["CPUExecutionProvider"])
     inp_name = sess.get_inputs()[0].name
     with _model_lock:
         _session = sess
         _input_name = inp_name
-    log.info(f"Model loaded from {target}, version={_model_version}")
+        _use_fallback = True
+    log.warning(f"Loaded FALLBACK model from disk: {FALLBACK_MODEL_PATH}")
+
+
+def _load_model(path: Optional[str] = None) -> None:
+    """Load model. If path is given, load from that ONNX file directly (admin reload).
+    Otherwise try MLflow first, fall back to committed model.onnx.
+    """
+    global _model_version, _use_fallback
+    if path:
+        # Explicit path (e.g. from /admin/reload with a specific file)
+        sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        inp_name = sess.get_inputs()[0].name
+        with _model_lock:
+            _session = sess
+            _input_name = inp_name
+            _use_fallback = False
+        log.info(f"Model loaded from explicit path {path}, version={_model_version}")
+        return
+
+    # Normal startup: try MLflow, fall back to disk
+    version = _load_from_mlflow()
+    if version is None:
+        # MLflow unavailable or failed — load committed model.onnx
+        _load_fallback()
 
 
 _load_model()
@@ -315,6 +427,12 @@ Instrumentator().instrument(app)
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
+    if _use_fallback:
+        return {
+            "status": "degraded",
+            "model_version": _model_version,
+            "reason": "MLflow unreachable or model load failed — serving committed fallback model.onnx",
+        }
     return {"status": "ok", "model_version": _model_version}
 
 
@@ -450,16 +568,41 @@ def feedback_metrics_since(model_version: str):
 # ---------------------------------------------------------------------------
 @app.post("/admin/reload")
 def admin_reload(version: Optional[str] = None):
+    """Hot-reload the ONNX model.
+
+    - With no args: re-pulls the latest version from MLflow registry.
+    - With ?version=N: pins to that MLflow registry version.
+    - Falls back to committed model.onnx if MLflow is unreachable.
+    """
     global _model_version
 
     def _do_reload(pin: Optional[str]) -> None:
         global _model_version
         try:
             if pin:
-                _model_version = f"m2_isolation_forest_v{pin}"
-            _load_model()
+                # Pin to a specific version: fetch that version from MLflow
+                import mlflow
+                import mlflow.sklearn
+                tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_URI)
+                model_name = os.environ.get("M2_REGISTERED_MODEL_NAME", DEFAULT_MODEL_NAME)
+                mlflow.set_tracking_uri(tracking_uri)
+                model_uri = f"models:/{model_name}/{pin}"
+                log.info(f"Reloading pinned version {pin} from {model_uri}")
+                pipeline = mlflow.sklearn.load_model(model_uri)
+                onnx_bytes = _sklearn_to_onnx_bytes(pipeline)
+                sess = ort.InferenceSession(onnx_bytes, providers=["CPUExecutionProvider"])
+                inp_name = sess.get_inputs()[0].name
+                with _model_lock:
+                    global _session, _input_name, _use_fallback
+                    _session = sess
+                    _input_name = inp_name
+                    _model_version = f"m2_isolation_forest_v{pin}"
+                    _use_fallback = False
+            else:
+                # Pull latest from MLflow
+                _load_model()
             _update_version_gauge()
-            log.info(f"Hot-reload complete, version={_model_version}")
+            log.info(f"Hot-reload complete, version={_model_version}, fallback={_use_fallback}")
         except Exception as e:
             log.error(f"Hot-reload failed: {e}")
 

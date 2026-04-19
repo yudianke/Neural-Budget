@@ -102,16 +102,22 @@ services:
       - "8003:8003"
     environment:
       MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M2_REGISTERED_MODEL_NAME: "m2-anomaly"
       M2_CONTAMINATION: "${M2_CONTAMINATION:-0.05}"
       M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
       PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc_m2"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
     volumes:
       - m2_feedback_data:/data/feedback
     networks:
       - ml-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"]
+      # Health check allows degraded status — fallback model still serves predictions
+      test: ["CMD", "python3", "-c", "import urllib.request, json; r=json.loads(urllib.request.urlopen('http://localhost:8003/health', timeout=3).read()); assert r['status'] in ('ok','degraded')"]
       interval: 30s
       timeout: 10s
       retries: 3
