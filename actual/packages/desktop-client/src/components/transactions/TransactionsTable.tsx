@@ -498,7 +498,10 @@ function AnomalyBadge({ transaction, onDismiss }: AnomalyBadgeProps) {
 
   if (
     transaction.anomaly_score == null ||
-    transaction.anomaly_dismissed === 1
+    // anomaly_dismissed is stored as INTEGER in SQLite but the AQL schema
+    // declares it as boolean, so it may arrive as true, false, 1, or 0.
+    transaction.anomaly_dismissed === 1 ||
+    transaction.anomaly_dismissed === true
   ) {
     return null;
   }

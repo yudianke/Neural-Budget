@@ -169,7 +169,7 @@ export default defineConfig(async ({ mode }) => {
           rewrite: (p: string) => p.replace(/^\/ml-api/, ''),
         },
         '/m3-api': {
-          target: env.M3_SERVICE_URL || 'http://129.114.26.3:8002',
+          target: env.M3_SERVICE_URL || 'http://localhost:8002',
           changeOrigin: true,
           rewrite: (p: string) => p.replace(/^\/m3-api/, ''),
         },

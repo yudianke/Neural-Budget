@@ -31,9 +31,10 @@ export type M2AnomalyResult = {
   model_version: string;
 };
 
-const DEFAULT_M2_URL = 'http://localhost:8002';
-// Minimum transactions before M2 is active (mirrors train_m2.py min_transactions)
-const MIN_TRANSACTIONS = 1;
+const DEFAULT_M2_URL = 'http://localhost:8003';
+// Minimum transactions before M2 is active (mirrors train_m2.py min_transactions).
+// Cold-start guard: IsolationForest needs enough history to establish a normal baseline.
+const MIN_TRANSACTIONS = 50;
 
 function getM2ServiceUrl(): string {
   return (

@@ -199,22 +199,19 @@ export async function batchUpdateTransactions({
     }
   }
 
-  // M2 anomaly scoring — synchronous so the badge appears immediately.
+  // M2 anomaly scoring — fire-and-forget so it never blocks the transaction save
+  // response. The badge appears asynchronously (< 5s) via the sync-event that
+  // persistAnomalyResult fires after writing to SQLite.
   for (const t of resultAdded) {
     if (t.id && !isTemporaryId(t.id) && !isPreviewId(t.id)) {
-      try {
-        const result = await scoreAnomaly(t);
-        if (result) {
-          logger.info('[M2] persisting anomaly result for', t.id);
-          await persistAnomalyResult(t.id, result);
-          // Patch the returned transaction so the frontend gets anomaly data immediately
-          t.anomaly_score = result.anomaly_score;
-          t.anomaly_flags = JSON.stringify(result.rule_flags);
-          t.anomaly_dismissed = 0;
-        }
-      } catch (err) {
-        logger.warn('[M2] anomaly scoring error', err);
-      }
+      scoreAnomaly(t)
+        .then(result => {
+          if (result) {
+            logger.info('[M2] persisting anomaly result for', t.id);
+            return persistAnomalyResult(t.id, result);
+          }
+        })
+        .catch(err => logger.warn('[M2] anomaly scoring error', err));
     }
   }
 

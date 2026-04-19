@@ -169,7 +169,7 @@ async function getLatestTransaction() {
   return data[0] || null;
 }
 
-const DEFAULT_M3_URL = 'http://129.114.26.3:8002';
+const DEFAULT_M3_URL = 'http://localhost:8002';
 
 function getM3ServiceUrl(): string {
   // Web Worker context — use same-origin Vite proxy to avoid COEP blocking

@@ -17,12 +17,23 @@ scrape_configs:
     metrics_path: /metrics
     scrape_interval: 15s
 
+  # M2 anomaly detection serving
+  # Exposes: http_requests_total, http_request_duration_seconds,
+  #          m2_predictions_total, m2_anomalies_total, m2_anomaly_score,
+  #          m2_rule_flags_total, m2_model_version_numeric
+  - job_name: "m2-serving"
+    static_configs:
+      - targets: ["m2-serving:8003"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
   # M3 forecast serving
   - job_name: "m3-serving"
     static_configs:
       - targets: ["m3-serving:8002"]
     metrics_path: /metrics
     scrape_interval: 15s
+
   # Prometheus self-monitoring
   - job_name: "prometheus"
     static_configs:
