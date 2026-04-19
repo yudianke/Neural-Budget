@@ -90,6 +90,14 @@ class ForecastFeatureRow(BaseModel):
     user_total_rolling_mean_3: float = 0.0
     category_share_lag_1: float = 0.0
 
+class TransactionIn(BaseModel):
+    user_id: str
+    transaction_id: str
+    date: str
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    amount: float
+    payee: Optional[str] = None
 
 class ForecastFeaturesRequest(BaseModel):
     rows: List[ForecastFeatureRow]
@@ -174,7 +182,44 @@ def health():
         "model_name": model_name,
     }
 
+@app.post("/transactions/ingest")
+def ingest_transaction(tx: TransactionIn):
+    sql = """
+    INSERT INTO local_user_transactions (
+        user_id,
+        transaction_id,
+        date,
+        category_id,
+        category_name,
+        amount,
+        payee
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (user_id, transaction_id)
+    DO UPDATE SET
+        date = EXCLUDED.date,
+        category_id = EXCLUDED.category_id,
+        category_name = EXCLUDED.category_name,
+        amount = EXCLUDED.amount,
+        payee = EXCLUDED.payee
+    """
 
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    tx.user_id,
+                    tx.transaction_id,
+                    tx.date,
+                    tx.category_id,
+                    tx.category_name,
+                    tx.amount,
+                    tx.payee,
+                ),
+            )
+
+    return {"status": "ok"}
 @app.post("/forecast/user", response_model=UserForecastResponse)
 def forecast_for_user(request: UserForecastRequest):
     REQUEST_COUNT.inc()

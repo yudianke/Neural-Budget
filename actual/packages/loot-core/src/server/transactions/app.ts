@@ -39,6 +39,38 @@ export type TransactionHandlers = {
   'forecast-export-monthly-history': typeof exportForecastMonthlyHistory;
 };
 
+async function sendTransactionToM3(transaction: TransactionEntity) {
+  try {
+    if (!transaction.id || !transaction.date || !transaction.amount) {
+      return;
+    }
+
+    let categoryName: string | null = null;
+
+    if (transaction.category) {
+      const category = await db.getCategory(transaction.category);
+      categoryName = category?.name ?? null;
+    }
+
+    await fetch('http://127.0.0.1:8002/transactions/ingest', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: 'local-user', // replace later with a better local identifier
+        transaction_id: transaction.id,
+        date: transaction.date,
+        category_id: transaction.category ?? null,
+        category_name: categoryName,
+        amount: Number(transaction.amount) / 100,
+        payee: transaction.payee ?? null,
+      }),
+    });
+  } catch (err) {
+    console.warn('M3 transaction ingest failed:', err);
+  }
+}
 async function exportForecastMonthlyHistory() {
   const prefs = await import('#server/prefs');
   const currentPrefs = prefs.getPrefs() || {};
@@ -66,12 +98,14 @@ async function handleBatchUpdateTransactions({
 }
 
 async function addTransaction(transaction: TransactionEntity) {
-  await handleBatchUpdateTransactions({added: [transaction]});
+  await handleBatchUpdateTransactions({ added: [transaction] });
+  await sendTransactionToM3(transaction);
   return {};
 }
 
 async function updateTransaction(transaction: TransactionEntity) {
-  await handleBatchUpdateTransactions({updated: [transaction]});
+  await handleBatchUpdateTransactions({ updated: [transaction] });
+  await sendTransactionToM3(transaction);
   return {};
 }
 
