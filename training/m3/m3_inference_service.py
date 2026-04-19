@@ -7,9 +7,49 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST, Gauge
+from fastapi import Response
+import time
+
+from db import get_conn
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("m3_service")
+
+REQUEST_COUNT = Counter(
+    "forecast_requests_total",
+    "Total number of forecast requests"
+)
+
+MODEL_LOAD_SUCCESS = Counter(
+    "model_load_success_total",
+    "Number of successful model loads"
+)
+
+MODEL_LOAD_FAILURE = Counter(
+    "model_load_failure_total",
+    "Number of failed model loads"
+)
+
+CURRENT_MODEL_VERSION = Gauge(
+    "current_model_version",
+    "Current production model version (timestamp-based)"
+)
+
+MODEL_LAST_LOADED_TS = Gauge(
+    "model_last_loaded_timestamp",
+    "Timestamp when model was last loaded"
+)
+
+REQUEST_ERRORS = Counter(
+    "forecast_errors_total",
+    "Total number of forecast errors"
+)
+
+REQUEST_LATENCY = Histogram(
+    "forecast_request_latency_seconds",
+    "Latency of forecast requests"
+)
 
 MODEL_BUNDLE_PATH = os.getenv("M3_V2_BUNDLE_PATH", "m3_v2_bundle.joblib")
 FEATURE_ROWS_PATH = os.getenv("M3_V2_FEATURES_PATH", "m3_v2_latest_features.csv")
@@ -59,6 +99,37 @@ class ForecastFeaturesResponse(BaseModel):
     forecasts: List[CategoryForecast]
     model_name: str
 
+
+def resolve_model_bundle_path() -> str:
+    fallback = os.getenv("M3_V2_BUNDLE_PATH", "m3_v2_bundle.joblib")
+
+    sql = """
+    SELECT artifact_path
+    FROM model_versions
+    WHERE status IN ('production', 'candidate')
+    ORDER BY
+        CASE WHEN status = 'production' THEN 0 ELSE 1 END,
+        trained_at DESC
+    LIMIT 1
+    """
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+
+        if row and row[0]:
+            path = row[0]
+            logger.info("Resolved model bundle from DB registry: %s", path)
+            return path
+
+    except Exception as e:
+        logger.warning("Falling back to env bundle path due to DB lookup error: %s", e)
+
+    logger.info("Resolved model bundle from fallback path: %s", fallback)
+    return fallback
+
 def load_bundle(path: str):
     if not os.path.exists(path):
         raise RuntimeError(f"Model bundle not found: {path}")
@@ -75,7 +146,7 @@ def load_feature_rows(path: str) -> pd.DataFrame:
     return df
 
 
-bundle = load_bundle(MODEL_BUNDLE_PATH)
+bundle = load_bundle(resolve_model_bundle_path())
 model = bundle["model"]
 feature_columns = bundle["feature_columns"]
 model_name = bundle.get("model_name", "m3-forecast-v2")
@@ -92,7 +163,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 @app.get("/health")
 def health():
     return {
@@ -104,71 +177,91 @@ def health():
 
 @app.post("/forecast/user", response_model=UserForecastResponse)
 def forecast_for_user(request: UserForecastRequest):
-    user_id = request.synthetic_user_id
+    REQUEST_COUNT.inc()
+    start = time.time()
 
-    user_rows = feature_df[feature_df["synthetic_user_id"] == user_id].copy()
-    if user_rows.empty:
-        raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
+    try:
+        user_id = request.synthetic_user_id
 
-    categories = user_rows["project_category"].tolist()
+        user_rows = feature_df[feature_df["synthetic_user_id"] == user_id].copy()
+        if user_rows.empty:
+            raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
 
-    drop_cols = [
-        "synthetic_user_id",
-        "project_category",
-        "year_month",
-        "target_next_month_spend",
-    ]
-    X = user_rows.drop(columns=[c for c in drop_cols if c in user_rows.columns])
+        categories = user_rows["project_category"].tolist()
 
-    # Apply same encoding as training
-    X = pd.get_dummies(X, dummy_na=True)
-    X = X.reindex(columns=feature_columns, fill_value=0)
+        drop_cols = [
+            "synthetic_user_id",
+            "project_category",
+            "year_month",
+            "target_next_month_spend",
+        ]
+        X = user_rows.drop(columns=[c for c in drop_cols if c in user_rows.columns])
 
-    preds = model.predict(X)
+        X = pd.get_dummies(X, dummy_na=True)
+        X = X.reindex(columns=feature_columns, fill_value=0)
 
-    forecasts = [
-        CategoryForecast(category=cat, forecast=float(pred))
-        for cat, pred in sorted(
-            zip(categories, preds),
-            key=lambda x: x[1],
-            reverse=True,
+        preds = model.predict(X)
+
+        forecasts = [
+            CategoryForecast(category=cat, forecast=float(pred))
+            for cat, pred in sorted(
+                zip(categories, preds),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+        ]
+
+        logger.info("Forecasted %d categories for user %s", len(forecasts), user_id)
+
+        return UserForecastResponse(
+            synthetic_user_id=user_id,
+            forecasts=forecasts,
+            model_name=model_name,
         )
-    ]
 
-    logger.info("Forecasted %d categories for user %s", len(forecasts), user_id)
+    except Exception:
+        REQUEST_ERRORS.inc()
+        raise
 
-    return UserForecastResponse(
-        synthetic_user_id=user_id,
-        forecasts=forecasts,
-        model_name=model_name,
-    )
-
+    finally:
+        REQUEST_LATENCY.observe(time.time() - start)
 @app.post("/forecast/features", response_model=ForecastFeaturesResponse)
 def forecast_from_features(request: ForecastFeaturesRequest):
-    if not request.rows:
-        raise HTTPException(status_code=400, detail="No feature rows provided")
+    REQUEST_COUNT.inc()
+    start = time.time()
 
-    rows_df = pd.DataFrame([row.model_dump() for row in request.rows])
+    try:
+        if not request.rows:
+            raise HTTPException(status_code=400, detail="No feature rows provided")
 
-    categories = rows_df["project_category"].tolist()
+        rows_df = pd.DataFrame([row.model_dump() for row in request.rows])
 
-    X = rows_df.copy()
-    X = pd.get_dummies(X, dummy_na=True)
-    X = X.reindex(columns=feature_columns, fill_value=0)
+        categories = rows_df["project_category"].tolist()
 
-    preds = model.predict(X)
+        X = rows_df.copy()
+        X = pd.get_dummies(X, dummy_na=True)
+        X = X.reindex(columns=feature_columns, fill_value=0)
 
-    forecasts = [
-        CategoryForecast(category=cat, forecast=float(pred))
-        for cat, pred in sorted(
-            zip(categories, preds),
-            key=lambda x: x[1],
-            reverse=True,
+        preds = model.predict(X)
+
+        forecasts = [
+            CategoryForecast(category=cat, forecast=float(pred))
+            for cat, pred in sorted(
+                zip(categories, preds),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+        ]
+        logger.info("Feature-based forecast for %d categories", len(forecasts))
+
+        return ForecastFeaturesResponse(
+            forecasts=forecasts,
+            model_name=model_name,
         )
-    ]
-    logger.info(f"Feature-based forecast for {len(forecasts)} categories")
 
-    return ForecastFeaturesResponse(
-        forecasts=forecasts,
-        model_name=model_name,
-    )
+    except Exception:
+        REQUEST_ERRORS.inc()
+        raise
+
+    finally:
+        REQUEST_LATENCY.observe(time.time() - start)

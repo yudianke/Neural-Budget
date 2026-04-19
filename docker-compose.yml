@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: nb-postgres
+    environment:
+      POSTGRES_DB: neuralbudget
+      POSTGRES_USER: nb_user
+      POSTGRES_PASSWORD: nb_pass
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./training/m3/schemas.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  forecast-api:
+    build:
+      context: .
+      dockerfile: training/m3/Dockerfile
+    container_name: nb-forecast-api
+    environment:
+      DATABASE_URL: postgresql://nb_user:nb_pass@postgres:5432/neuralbudget
+      M3_V2_BUNDLE_PATH: /app/m3_v2_bundle.joblib
+      M3_V2_FEATURES_PATH: /app/m3_v2_latest_features.csv
+    ports:
+      - "8002:8002"
+    depends_on:
+      - postgres
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nb-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - forecast-api
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nb-grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
