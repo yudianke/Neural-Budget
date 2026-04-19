@@ -52,13 +52,19 @@ const addWatchers = (): Plugin => ({
  */
 const mlActualsPlugin = (): Plugin => ({
   name: 'ml-actuals',
+  // 'pre' order ensures this middleware runs before Vite's HTML fallback handler
   configureServer(server) {
-    server.middlewares.use('/api/ml/actuals', (req, res) => {
+    server.middlewares.use((req, res, next) => {
+      // Only handle /api/ml/actuals — pass everything else to Vite
+      if (!req.url?.startsWith('/api/ml/actuals')) {
+        next();
+        return;
+      }
       try {
         // Dynamic require so Vite doesn't try to bundle better-sqlite3
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const Database = require('better-sqlite3');
-        const url = new URL(req.url || '/', 'http://localhost');
+        const url = new URL(req.url, 'http://localhost');
         const months = Math.min(
           Math.max(parseInt(url.searchParams.get('months') || '12', 10), 1),
           36,
