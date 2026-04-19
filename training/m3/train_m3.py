@@ -104,6 +104,11 @@ DROP_AT_TRAIN = [
     "AGE_REF",
     "FAM_SIZE",
     "user_scale",
+    # Cross-user aggregate features — not computable at inference time from
+    # a single user's ActualBudget data; always zeroed at inference → training bias
+    "user_total_lag_1",
+    "user_total_rolling_mean_3",
+    "category_share_lag_1",
 ]
 
 
@@ -155,7 +160,7 @@ def _build_supervised_rows(monthly_df: pd.DataFrame, min_history: int = 3) -> pd
                 "lag_3":  prior[-3] if len(prior) >= 3 else 0,
                 "lag_6":  prior[-6] if len(prior) >= 6 else 0,
                 "rolling_mean_3": float(np.mean(prior3)),
-                "rolling_std_3":  float(np.std(prior3))  if len(prior3) > 1 else 0.0,
+                "rolling_std_3":  float(np.std(prior3, ddof=1))  if len(prior3) > 1 else 0.0,
                 "rolling_mean_6": float(np.mean(prior6)),
                 "rolling_max_3":  float(np.max(prior3)),
                 "history_month_count": len(prior),

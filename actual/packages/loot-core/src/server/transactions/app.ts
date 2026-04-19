@@ -301,6 +301,13 @@ async function getCategoryPredictions() {
     if (!categoryName) continue;
 
     const yearMonth = String(txn.date).slice(0, 7);
+
+    // Exclude the current in-progress month — it is a partial month and its
+    // spend is systematically lower than a full month, which biases lag_1 low
+    // (e.g. on April 18, only ~60% of April's spend is recorded).
+    // The model was trained on complete months only.
+    if (yearMonth === currentMonth) continue;
+
     const amount = -Number(txn.amount || 0) / 100;
 
     const key = `${categoryName}__${yearMonth}`;

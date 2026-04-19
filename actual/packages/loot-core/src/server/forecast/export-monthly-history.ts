@@ -54,7 +54,10 @@ export async function exportMonthlyCategoryHistory(
 
     const row = resultMap.get(key)!;
 
-    // IMPORTANT: Actual stores amounts in cents (negative for expenses)
+    // IMPORTANT: Actual stores expenses as negative cents.
+    // Skip income/refunds (amount >= 0) — only count actual outgoing spend.
+    // Consistent with getCategoryPredictions in app.ts which filters amount > 0.
+    if (t.amount >= 0) continue;
     const amount = Math.abs(t.amount) / 100;
 
     row.monthly_spend += amount;
