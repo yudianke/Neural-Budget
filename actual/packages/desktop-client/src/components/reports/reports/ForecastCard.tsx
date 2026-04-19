@@ -1,12 +1,15 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 
-import {Trans} from 'react-i18next';
+import {Trans, useTranslation} from 'react-i18next';
 
 import {Button} from '@actual-app/components/button';
+import {styles} from '@actual-app/components/styles';
+import {theme} from '@actual-app/components/theme';
 import {Text} from '@actual-app/components/text';
 import {View} from '@actual-app/components/view';
 import {send} from '@actual-app/core/platform/client/connection';
 
+import {LoadingIndicator} from '#components/reports/LoadingIndicator';
 import {ReportCard} from '#components/reports/ReportCard';
 
 type ForecastCardProps = {
@@ -31,11 +34,180 @@ type ForecastResponse = {
   model_name: string;
 };
 
+function fmt(n: number): string {
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  });
+}
+
+/** A single category row with a comparison bar */
+function CategoryRow({
+  item,
+  scale,
+  isTop,
+}: {
+  item: CategoryForecast;
+  scale: number; // px-per-dollar for bar widths
+  isTop: boolean;
+}) {
+  const forecast = item.forecast ?? 0;
+  const budgeted = item.budgeted ?? 0;
+  const lastMonth = item.last_month ?? 0;
+  const gap = item.gap_to_budget;
+
+  // Bar widths — cap at 100% of the container
+  const forecastPct = Math.min((forecast / (scale || 1)) * 100, 100);
+  const budgetedPct = Math.min((budgeted / (scale || 1)) * 100, 100);
+  const lastPct = Math.min((lastMonth / (scale || 1)) * 100, 100);
+
+  const overBudget = gap != null && gap > 0;
+  const underBudget = gap != null && gap < 0;
+
+  const barColor = isTop
+    ? theme.reportsNumberNegative
+    : overBudget
+      ? theme.reportsRed
+      : theme.reportsGreen;
+
+  const gapColor = overBudget
+    ? theme.reportsNumberNegative
+    : underBudget
+      ? theme.reportsNumberPositive
+      : theme.reportsNumberNeutral;
+
+  return (
+    <View style={{gap: 5}}>
+      {/* Label row */}
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+        }}
+      >
+        <Text
+          style={{
+            fontSize: 13,
+            fontWeight: isTop ? 600 : 400,
+            color: theme.tableText,
+            flexShrink: 1,
+            marginRight: 8,
+          }}
+        >
+          {item.category}
+        </Text>
+
+        <View style={{flexDirection: 'row', gap: 10, alignItems: 'baseline'}}>
+          {/* Last month — muted reference */}
+          {lastMonth > 0 && (
+            <Text
+              style={{
+                fontSize: 11,
+                color: theme.pageTextSubdued,
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              {fmt(lastMonth)}
+            </Text>
+          )}
+
+          {/* Forecast — primary number */}
+          <Text
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: theme.tableText,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {item.forecast != null ? fmt(forecast) : '—'}
+          </Text>
+
+          {/* Gap chip */}
+          {gap != null && (
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: 500,
+                color: gapColor,
+                fontVariantNumeric: 'tabular-nums',
+                minWidth: 48,
+                textAlign: 'right',
+              }}
+            >
+              {gap > 0 ? '+' : ''}{fmt(gap)}
+            </Text>
+          )}
+        </View>
+      </View>
+
+      {/* Comparison bar */}
+      <View
+        style={{
+          position: 'relative',
+          height: 8,
+          borderRadius: 4,
+          backgroundColor: theme.tableBorder,
+          overflow: 'visible',
+        }}
+      >
+        {/* Budget target marker (dotted line) */}
+        {budgeted > 0 && budgetedPct > 0 && (
+          <View
+            style={{
+              position: 'absolute',
+              left: `${budgetedPct}%`,
+              top: -2,
+              bottom: -2,
+              width: 2,
+              borderRadius: 1,
+              backgroundColor: theme.reportsBlue,
+              opacity: 0.7,
+            }}
+          />
+        )}
+
+        {/* Last month marker (subtle tick) */}
+        {lastMonth > 0 && lastPct > 0 && (
+          <View
+            style={{
+              position: 'absolute',
+              left: `${lastPct}%`,
+              top: 0,
+              bottom: 0,
+              width: 1,
+              backgroundColor: theme.pageTextSubdued,
+              opacity: 0.5,
+            }}
+          />
+        )}
+
+        {/* Forecast fill */}
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: `${Math.max(forecastPct, forecastPct > 0 ? 2 : 0)}%`,
+            borderRadius: 4,
+            backgroundColor: barColor,
+            opacity: 0.85,
+          }}
+        />
+      </View>
+    </View>
+  );
+}
+
 export function ForecastCard({
   isEditing,
   onRemove,
   onCopy,
 }: ForecastCardProps) {
+  const {t} = useTranslation();
   const [data, setData] = useState<ForecastResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -57,174 +229,211 @@ export function ForecastCard({
     void load();
   }, [load]);
 
-  const sortedForecasts = useMemo(() => {
+  // Sort by gap descending (highest over-budget risk first)
+  const topForecasts = useMemo(() => {
     if (!data?.forecasts) return [];
-    return [...data.forecasts].sort(
-      (a, b) =>
-        (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) -
-        (a.gap_to_budget ?? Number.NEGATIVE_INFINITY),
-    );
+    return [...data.forecasts]
+      .sort(
+        (a, b) =>
+          (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) -
+          (a.gap_to_budget ?? Number.NEGATIVE_INFINITY),
+      )
+      .slice(0, 6);
   }, [data]);
 
-  const topForecasts = useMemo(() => sortedForecasts.slice(0, 6), [sortedForecasts]);
+  // Total forecast across all categories (not just top-6)
+  const totalForecast = useMemo(() => {
+    if (!data?.forecasts) return null;
+    const sum = data.forecasts.reduce((acc, f) => acc + (f.forecast ?? 0), 0);
+    return sum > 0 ? sum : null;
+  }, [data]);
 
-  const maxForecast = useMemo(
-    () => (topForecasts.length ? Math.max(...topForecasts.map(item => item.forecast ?? 0)) : 0),
-    [topForecasts],
-  );
+  // Scale = the max value among forecast + budgeted + last_month across rows
+  // Used to normalize all bars to the same reference width
+  const barScale = useMemo(() => {
+    if (!topForecasts.length) return 1;
+    return Math.max(
+      ...topForecasts.flatMap(f => [
+        f.forecast ?? 0,
+        f.budgeted ?? 0,
+        f.last_month ?? 0,
+      ]),
+      1,
+    );
+  }, [topForecasts]);
 
-  const topCategory = topForecasts[0];
+  const nowLabel = useMemo(() => {
+    const d = new Date();
+    return d.toLocaleString('default', {month: 'long', year: 'numeric'});
+  }, []);
 
   return (
     <ReportCard
       isEditing={isEditing}
       menuItems={[
-        {name: 'remove', text: 'Remove'},
-        {name: 'copy', text: 'Copy'},
+        {name: 'remove', text: t('Remove')},
+        {name: 'copy', text: t('Copy')},
       ]}
       onMenuSelect={item => {
         if (item === 'remove') onRemove();
         if (item === 'copy') onCopy('');
       }}
     >
-      <View style={{flex: 1, padding: 10, gap: 8}}>
+      <View style={{flex: 1}}>
+        {/* Header */}
         <View
           style={{
             flexDirection: 'row',
             justifyContent: 'space-between',
-            alignItems: 'center',
+            alignItems: 'flex-start',
+            padding: 20,
+            paddingBottom: 12,
           }}
         >
-          <Text style={{fontSize: 18, fontWeight: 600}}>
-            <Trans>Personalized Forecast</Trans>
-          </Text>
-
-          <Button
-            variant="bare"
-            onPress={() => void load()}
-            style={{padding: '2px 6px', fontSize: 12, opacity: 0.7}}
-          >
-            {loading ? <Trans>Loading...</Trans> : <Trans>Refresh</Trans>}
-          </Button>
-        </View>
-
-        <Text style={{fontSize: 14, opacity: 0.7}}>
-          <Trans>Forecasted spend vs current budget by category</Trans>
-        </Text>
-
-        {error ? (
-          <Text style={{color: '#ff7b7b'}}>{error}</Text>
-        ) : loading && !data ? (
-          // Skeleton placeholder while first load is in flight
-          <View style={{marginTop: 8, gap: 10}}>
-            {[1, 2, 3, 4].map(i => (
-              <View key={i} style={{gap: 4}}>
-                <View
-                  style={{
-                    height: 14,
-                    borderRadius: 4,
-                    backgroundColor: 'rgba(255,255,255,0.08)',
-                    width: `${50 + i * 10}%`,
-                  }}
-                />
-                <View
-                  style={{
-                    height: 12,
-                    borderRadius: 999,
-                    backgroundColor: 'rgba(255,255,255,0.05)',
-                  }}
-                />
-              </View>
-            ))}
+          <View style={{flex: 1}}>
+            <Text
+              style={{
+                ...styles.mediumText,
+                fontWeight: 500,
+                color: theme.tableText,
+              }}
+            >
+              <Trans>Forecast</Trans>
+            </Text>
+            <Text style={{fontSize: 12, color: theme.pageTextSubdued, marginTop: 2}}>
+              {nowLabel}
+            </Text>
           </View>
-        ) : data ? (
-          <View style={{marginTop: 8, gap: 10}}>
-            {topCategory && (
-              <Text style={{opacity: 0.7}}>
-                <Trans>Highest budget risk:</Trans>{' '}
-                {topCategory.category}
-                {topCategory.gap_to_budget != null
-                  ? ` (${topCategory.gap_to_budget >= 0 ? '+' : ''}$${topCategory.gap_to_budget.toFixed(0)} vs budget)`
-                  : ''}
+
+          <View style={{alignItems: 'flex-end', gap: 4}}>
+            {totalForecast != null && (
+              <Text
+                style={{
+                  ...styles.mediumText,
+                  fontWeight: 500,
+                  color: theme.tableText,
+                }}
+              >
+                {fmt(totalForecast)}
               </Text>
             )}
+            <Button
+              variant="bare"
+              onPress={() => void load()}
+              style={{
+                padding: '2px 6px',
+                fontSize: 11,
+                color: theme.pageTextSubdued,
+                marginTop: 2,
+              }}
+            >
+              {loading ? <Trans>Loading…</Trans> : <Trans>Refresh</Trans>}
+            </Button>
+          </View>
+        </View>
 
-            {topForecasts.map((item, idx) => {
-              const value = item.forecast ?? 0;
-              const widthPct =
-                maxForecast > 0 ? Math.max((value / maxForecast) * 100, 2) : 0;
-              const isTop = idx === 0;
+        {/* Body */}
+        {error ? (
+          <View style={{padding: '0 20px 20px'}}>
+            <Text style={{fontSize: 13, color: theme.reportsRed}}>
+              {error}
+            </Text>
+          </View>
+        ) : loading && !data ? (
+          <LoadingIndicator />
+        ) : data && topForecasts.length > 0 ? (
+          <View style={{flex: 1, padding: '0 20px 16px', gap: 12}}>
+            {/* Legend */}
+            <View
+              style={{
+                flexDirection: 'row',
+                gap: 14,
+                alignItems: 'center',
+              }}
+            >
+              <LegendItem color={theme.reportsGreen} label={t('Forecast')} />
+              <LegendItem color={theme.reportsBlue} label={t('Budget')} bar />
+              <LegendItem color={theme.pageTextSubdued} label={t('Last mo.')} bar thin />
+            </View>
 
-              return (
-                <View key={item.category} style={{gap: 4}}>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                    }}
-                  >
-                    <Text style={{fontWeight: isTop ? 600 : 400}}>
-                      {item.category}
-                    </Text>
+            {/* Category rows */}
+            {topForecasts.map((item, idx) => (
+              <CategoryRow
+                key={item.category}
+                item={item}
+                scale={barScale}
+                isTop={idx === 0}
+              />
+            ))}
 
-                    <View style={{flexDirection: 'row', gap: 8, alignItems: 'center'}}>
-                      {/* Last month actual — shown in muted text when available */}
-                      {item.last_month != null && item.last_month > 0 && (
-                        <Text style={{opacity: 0.5, fontSize: 12}}>
-                          <Trans>last</Trans>{' '}${item.last_month.toFixed(0)}
-                        </Text>
-                      )}
-
-                      <Text>
-                        {item.forecast != null
-                          ? `$${item.forecast.toFixed(0)}`
-                          : 'N/A'}
-                      </Text>
-
-                      {item.gap_to_budget != null && (
-                        <Text
-                          style={{
-                            color:
-                              item.gap_to_budget > 0 ? '#ff7b7b' : '#7bffb0',
-                            fontWeight: 500,
-                          }}
-                        >
-                          {item.gap_to_budget > 0 ? '+' : ''}$
-                          {item.gap_to_budget.toFixed(0)}
-                        </Text>
-                      )}
-                    </View>
-                  </View>
-
-                  <View
-                    style={{
-                      height: 12,
-                      borderRadius: 999,
-                      backgroundColor: 'rgba(255,255,255,0.08)',
-                      overflow: 'hidden',
-                    }}
-                  >
-                    <View
-                      style={{
-                        width: `${widthPct}%`,
-                        height: '100%',
-                        borderRadius: 999,
-                        backgroundColor: isTop
-                          ? 'rgba(255, 180, 80, 0.95)'
-                          : 'rgba(116, 255, 200, 0.85)',
-                      }}
-                    />
-                  </View>
-                </View>
-              );
-            })}
-
-            <Text style={{marginTop: 10, opacity: 0.6}}>
-              <Trans>Model:</Trans> {data.model_name}
+            {/* Footer */}
+            <Text
+              style={{
+                fontSize: 11,
+                color: theme.pageTextSubdued,
+                marginTop: 4,
+              }}
+            >
+              {data.model_name}
+            </Text>
+          </View>
+        ) : data && topForecasts.length === 0 ? (
+          <View
+            style={{
+              flex: 1,
+              justifyContent: 'center',
+              alignItems: 'center',
+              padding: 20,
+            }}
+          >
+            <Text style={{fontSize: 13, color: theme.pageTextSubdued, textAlign: 'center'}}>
+              <Trans>
+                Not enough transaction history to generate forecasts. Add at least 3 months of
+                spending data to get started.
+              </Trans>
             </Text>
           </View>
         ) : null}
       </View>
     </ReportCard>
+  );
+}
+
+function LegendItem({
+  color,
+  label,
+  bar,
+  thin,
+}: {
+  color: string;
+  label: string;
+  bar?: boolean;
+  thin?: boolean;
+}) {
+  return (
+    <View style={{flexDirection: 'row', gap: 4, alignItems: 'center'}}>
+      {bar ? (
+        <View
+          style={{
+            width: thin ? 1 : 2,
+            height: 10,
+            borderRadius: 1,
+            backgroundColor: color,
+            opacity: thin ? 0.5 : 0.7,
+          }}
+        />
+      ) : (
+        <View
+          style={{
+            width: 10,
+            height: 6,
+            borderRadius: 3,
+            backgroundColor: color,
+            opacity: 0.85,
+          }}
+        />
+      )}
+      <Text style={{fontSize: 11, color: theme.pageTextSubdued}}>{label}</Text>
+    </View>
   );
 }
