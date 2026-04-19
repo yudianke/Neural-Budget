@@ -437,4 +437,12 @@ charity, education, entertainment, gas, groceries, healthcare, housing, misc, pe
 ---
 
 ## Safeguarding Plan
-Must implement concrete mechanisms for: fairness, explainability, transparency, privacy, accountability, robustness.
+See **[SAFEGUARDING.md](./SAFEGUARDING.md)** for the full system-wide safeguarding plan covering all six dimensions (fairness, explainability, transparency, privacy, accountability, robustness) across M1, M2, and M3.
+
+**Summary of implemented mechanisms:**
+- **Fairness:** Per-category F1 gate (M1), dismiss-rate contamination adjustment (M2), per-category MAE regression gate (M3)
+- **Explainability:** Top-50 TF-IDF n-gram artifact in MLflow (M1), badge type + rule flags in UI (M2), per-category forecast breakdown (M3)
+- **Transparency:** Confidence score surfaced to user (M1), degraded-mode disclosure (M2), Grafana dashboards for all models
+- **Privacy:** PII card-number scan on training data (M1), minimal feature payload to serving (M2), no demographic features (M3)
+- **Accountability:** Git SHA + data MD5 logged per run (M1, M3), dismiss JSONL + MLflow retrain events (M2)
+- **Robustness:** Low-confidence rate metric + quality gates (M1), cold-start guard + timeout + contamination floor (M2), three-gate promotion + automated MAE rollback (M3)

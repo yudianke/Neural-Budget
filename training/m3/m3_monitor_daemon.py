@@ -344,18 +344,31 @@ def _run_accuracy_eval(state: dict) -> dict:
     state["last_eval_year_month"] = now_ym
 
     if new_mae is None:
-        log.warning(
-            "Could not compute production MAE for v%s — "
-            "not enough actuals yet or forecast-accuracy endpoint unreachable. "
-            "Skipping rollback check.",
-            version_after,
-        )
-        _log_event_to_mlflow("eval_no_data", {
-            "year_month": now_ym,
-            "version_after": version_after,
-            "version_before": version_before,
-        })
-        return state
+        # M3_ACTUALS_URL is not set or the endpoint returned no data yet.
+        # Fall back to the training-time eval MAE logged to MLflow for this
+        # version so rollback can still fire automatically without real actuals.
+        mlflow_mae = _get_mlflow_mae_for_version(str(version_after))
+        if mlflow_mae is not None:
+            log.warning(
+                "No production MAE for v%s (M3_ACTUALS_URL not set or no actuals yet). "
+                "Falling back to MLflow training-eval MAE=%.4f for rollback decision. "
+                "Set M3_ACTUALS_URL to an actuals endpoint for production-quality rollback.",
+                version_after, mlflow_mae,
+            )
+            new_mae = mlflow_mae
+        else:
+            log.warning(
+                "Could not compute production MAE for v%s — "
+                "no actuals URL and no MLflow training MAE available. "
+                "Skipping rollback check.",
+                version_after,
+            )
+            _log_event_to_mlflow("eval_no_data", {
+                "year_month": now_ym,
+                "version_after": version_after,
+                "version_before": version_before,
+            })
+            return state
 
     # Decide whether to roll back
     should_rollback = False
