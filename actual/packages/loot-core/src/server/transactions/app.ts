@@ -365,13 +365,19 @@ async function getCategoryPredictions() {
     const is_q4 = [10, 11, 12].includes(month_num) ? 1 : 0;
     const {month_sin, month_cos} = monthTrig(month_num);
 
+    // lag offsets match training convention in _build_supervised_rows:
+    //   monthly_spend = prior[-1]  → lag(0) = history[-1]
+    //   lag_1         = prior[-1]  → lag(0) = history[-1]  (same as monthly_spend)
+    //   lag_2         = prior[-2]  → lag(1) = history[-2]
+    //   lag_3         = prior[-3]  → lag(2) = history[-3]
+    //   lag_6         = prior[-6]  → lag(5) = history[-6]
     featureRows.push({
       project_category,
       monthly_spend: latest.monthly_spend,
-      lag_1: lag(1),
-      lag_2: lag(2),
-      lag_3: lag(3),
-      lag_6: lag(6),
+      lag_1: lag(0),
+      lag_2: lag(1),
+      lag_3: lag(2),
+      lag_6: lag(5),
       rolling_mean_3: mean(prior3),
       rolling_std_3: std(prior3),
       rolling_mean_6: mean(prior6),
@@ -431,7 +437,9 @@ async function getCategoryPredictions() {
 
       return {
         ...forecast,
-        last_month: match ? match.lag_1 : null,
+        // lag_1 = current month (same as monthly_spend after fix)
+        // lag_2 = actual previous month spend
+        last_month: match ? match.lag_2 : null,
         budgeted,
         gap_to_budget,
       };

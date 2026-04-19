@@ -26,7 +26,7 @@ echo "[M3-retrain] Training M3 forecast model..."
 MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
   python3 "$SCRIPT_DIR/train_m3.py"
 
-# Step 3: If new version registered, reload the inference service
+# Step 2: If new version registered, reload the inference service
 echo "[M3-retrain] Checking for new version and reloading serving..."
 curl -s -X POST "$M3_SERVING_URL/admin/reload" \
   -H 'Content-Type: application/json' | python3 -c "

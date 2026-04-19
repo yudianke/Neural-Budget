@@ -315,6 +315,66 @@
         { "expr": "rate(m1_corrections_total[5m])", "legendFormat": "Corrections" },
         { "expr": "rate(m1_accepts_total[5m])", "legendFormat": "Accepts" }
       ]
+    },
+
+    { "type": "text", "id": 20,
+      "title": "── M3 Budget Forecasting ──",
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 2 },
+      "options": { "mode": "markdown", "content": "## M3 — Budget Forecasting" }
+    },
+    {
+      "id": 21, "title": "M3 Model Version",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 30, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } } },
+      "targets": [{ "expr": "m3_model_version_numeric", "legendFormat": "M3 Version" }]
+    },
+    {
+      "id": 22, "title": "M3 Forecast Requests/s",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 30, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }] } } },
+      "targets": [{ "expr": "rate(http_requests_total{job=\"m3-serving\",handler=\"/forecast/features\"}[1m])", "legendFormat": "req/s" }]
+    },
+    {
+      "id": 23, "title": "M3 P99 Latency",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 30, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 2000 }] } } },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"m3-serving\",handler=\"/forecast/features\"}[5m])) * 1000", "legendFormat": "P99 ms" }]
+    },
+    {
+      "id": 24, "title": "M3 Total Forecasts Served",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 30, "w": 4, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "purple" } } },
+      "targets": [{ "expr": "sum(m3_predictions_total)", "legendFormat": "Total Forecasts" }]
+    },
+    {
+      "id": 25, "title": "M3 Request Rate Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 34, "w": 12, "h": 8 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "fixed", "fixedColor": "purple" } } },
+      "targets": [{ "expr": "rate(http_requests_total{job=\"m3-serving\",handler=\"/forecast/features\"}[1m])", "legendFormat": "Forecast req/s" }]
+    },
+    {
+      "id": 26, "title": "M3 Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 34, "w": 12, "h": 8 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"m3-serving\"}[5m])) * 1000", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"m3-serving\"}[5m])) * 1000", "legendFormat": "P95" },
+        { "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"m3-serving\"}[5m])) * 1000", "legendFormat": "P99" }
+      ]
     }
   ]
 }

@@ -65,8 +65,10 @@ M3_MODEL_VER   = Gauge("m3_model_version_numeric", "Loaded model version (int)")
 # Load from MLflow
 # ---------------------------------------------------------------------------
 def _select_version(client: MlflowClient) -> str | None:
-    if MODEL_VER:
-        return MODEL_VER
+    # Read live so /admin/reload?version=X actually works (not frozen at import)
+    pin = os.environ.get("M3_MODEL_VERSION")
+    if pin:
+        return pin
     versions = client.search_model_versions(f"name='{MODEL_NAME}'")
     if not versions:
         return None
@@ -149,9 +151,6 @@ class ForecastFeatureRow(BaseModel):
     is_q4: float
     month_sin: float = 0.0
     month_cos: float = 0.0
-    user_total_lag_1: float = 0.0
-    user_total_rolling_mean_3: float = 0.0
-    category_share_lag_1: float = 0.0
 
 
 class ForecastFeaturesRequest(BaseModel):
