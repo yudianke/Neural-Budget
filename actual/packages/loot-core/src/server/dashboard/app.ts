@@ -41,6 +41,7 @@ function isWidgetType(type: string): type is DashboardWidgetEntity['type'] {
     'formula-card',
     'custom-report',
     'sankey-card',
+    'forecast-card',
   ].includes(type);
 }
 

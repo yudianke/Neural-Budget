@@ -168,6 +168,19 @@ async function getLatestTransaction() {
   return data[0] || null;
 }
 
+const DEFAULT_M3_URL = 'http://129.114.26.3:8002';
+
+function getM3ServiceUrl(): string {
+  // Web Worker context — use same-origin Vite proxy to avoid COEP blocking
+  if (typeof self !== 'undefined' && typeof (self as any).importScripts === 'function') {
+    return `${(self as any).location.origin}/m3-api`;
+  }
+  return (
+    (typeof process !== 'undefined' && process.env?.M3_SERVICE_URL) ||
+    DEFAULT_M3_URL
+  );
+}
+
 function monthToNumber(yearMonth: string) {
   return Number(yearMonth.slice(5, 7));
 }
@@ -220,17 +233,7 @@ async function getCategoryPredictions() {
       ]),
   );
 
-  console.log(
-    'FORECAST TXN SAMPLE:',
-    data.slice(0, 10).map(t => ({
-      id: t.id,
-      date: t.date,
-      amount: t.amount,
-      category: t.category,
-      payee: t.payee,
-      transfer_id: t.transfer_id,
-    })),
-  );
+
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(
     now.getMonth() + 1,
@@ -247,16 +250,7 @@ async function getCategoryPredictions() {
     return v === '' ? 0 : v;
   }
 
-  console.log(
-  'BUDGET DEBUG SAMPLE:',
-  categoryRows.slice(0, 5).map(cat => ({
-    id: cat.id,
-    name: cat.name,
-    budgeted: value(`budget-${cat.id}`),
-    spent: value(`sum-amount-${cat.id}`),
-    balance: value(`leftover-${cat.id}`),
-  })),
-);
+
   const budgetMap = new Map<string, number>();
 
   for (const cat of categoryRows) {
@@ -396,19 +390,26 @@ async function getCategoryPredictions() {
     return {forecasts: [], model_name: 'm3-forecast-v2'};
   }
 
-  const response = await fetch('http://127.0.0.1:8002/forecast/features', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({rows: featureRows}),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Forecast service returned ${response.status}`);
+  let result: { forecasts: Array<{ category: string; forecast: number | null }>; model_name: string };
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(`${getM3ServiceUrl()}/forecast/features`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rows: featureRows}),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw new Error(`M3 service returned ${response.status}`);
+    }
+    result = await response.json();
+  } catch (err) {
+    // M3 service down or timeout — return empty forecasts, don't crash UI
+    return {forecasts: [], model_name: 'm3-forecast-v2'};
   }
-
-  const result = await response.json();
 
   const enrichedForecasts = result.forecasts.map(
     (forecast: { category: string; forecast: number | null }) => {

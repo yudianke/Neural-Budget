@@ -17,6 +17,13 @@ scrape_configs:
     metrics_path: /metrics
     scrape_interval: 15s
 
+  # M3 forecast serving
+  - job_name: "m3-serving"
+    static_configs:
+      - targets: ["m3-serving:8002"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
   # Prometheus self-monitoring
   - job_name: "prometheus"
     static_configs:

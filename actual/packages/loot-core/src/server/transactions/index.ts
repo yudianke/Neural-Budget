@@ -41,28 +41,7 @@ async function getTransactionsByIds(
   );
 }
 
-async function callForecastService(category: string) {
-  try {
-    const response = await fetch('http://127.0.0.1:8002/forecast', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({category}),
-    });
 
-    if (!response.ok) {
-      throw new Error(`Forecast service returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    console.log('FORECAST RESULT:', data);
-    return data;
-  } catch (error) {
-    console.error('Forecast service call failed:', error);
-    return null;
-  }
-}
 
 export async function batchUpdateTransactions({
                                                 added,
@@ -112,21 +91,6 @@ export async function batchUpdateTransactions({
           const account = accounts.find(acct => acct.id === t.account);
           if (t.is_parent || account?.offbudget === 1) {
             t.category = null;
-          }
-
-          let categoryName = null;
-
-          if (t.category) {
-            const category = await db.getCategory(t.category);
-            categoryName = category?.name;
-          }
-
-          if (categoryName) {
-            const forecast: any = await callForecastService(categoryName);
-
-            if (forecast?.forecast != null) {
-              t.notes = `Forecast: ${forecast.forecast.toFixed(2)}`;
-            }
           }
 
           return db.insertTransaction(t);

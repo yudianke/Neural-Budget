@@ -1,5 +1,7 @@
 import {useEffect, useMemo, useState} from 'react';
 
+import {Trans} from 'react-i18next';
+
 import {Text} from '@actual-app/components/text';
 import {View} from '@actual-app/components/view';
 import {send} from '@actual-app/core/platform/client/connection';
@@ -29,10 +31,10 @@ type ForecastResponse = {
 };
 
 export function ForecastCard({
-                               isEditing,
-                               onRemove,
-                               onCopy,
-                             }: ForecastCardProps) {
+  isEditing,
+  onRemove,
+  onCopy,
+}: ForecastCardProps) {
   const [data, setData] = useState<ForecastResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,39 +42,30 @@ export function ForecastCard({
     async function run() {
       try {
         setError(null);
-        console.log('UI calling forecast-get-category-predictions');
         const json = await send('forecast-get-category-predictions');
         setData(json);
       } catch (err) {
-        console.error('ForecastCard failed FULL:', err);
-        setError(err instanceof Error ? err.message : JSON.stringify(err));
+        setError(err instanceof Error ? err.message : String(err));
       }
     }
-
     void run();
   }, []);
+
   const sortedForecasts = useMemo(() => {
     if (!data?.forecasts) return [];
     return [...data.forecasts].sort(
-      (a, b) => (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) - (a.gap_to_budget ?? Number.NEGATIVE_INFINITY)
+      (a, b) =>
+        (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) -
+        (a.gap_to_budget ?? Number.NEGATIVE_INFINITY),
     );
   }, [data]);
 
-  const topForecasts = useMemo(() => {
-    return sortedForecasts.slice(0, 6);
-  }, [sortedForecasts]);
+  const topForecasts = useMemo(() => sortedForecasts.slice(0, 6), [sortedForecasts]);
 
-  const maxForecast = useMemo(() => {
-    if (!topForecasts.length) return 0;
-    return Math.max(...topForecasts.map(item => item.forecast ?? 0));
-  }, [topForecasts]);
-
-  const total = useMemo(() => {
-    return topForecasts.reduce(
-      (sum, x) => sum + (x.forecast ?? 0),
-      0
-    );
-  }, [topForecasts]);
+  const maxForecast = useMemo(
+    () => (topForecasts.length ? Math.max(...topForecasts.map(item => item.forecast ?? 0)) : 0),
+    [topForecasts],
+  );
 
   const topCategory = topForecasts[0];
 
@@ -90,46 +83,32 @@ export function ForecastCard({
     >
       <View style={{flex: 1, padding: 10, gap: 8}}>
         <Text style={{fontSize: 18, fontWeight: 600}}>
-          Personalized Forecast
+          <Trans>Personalized Forecast</Trans>
         </Text>
 
         <Text style={{fontSize: 14, opacity: 0.7}}>
-          Forecasted spend vs current budget by category
+          <Trans>Forecasted spend vs current budget by category</Trans>
         </Text>
 
         {error ? (
           <Text>{error}</Text>
         ) : data ? (
           <View style={{marginTop: 8, gap: 10}}>
-            {/* Insight line */}
             {topCategory && (
               <Text style={{opacity: 0.7}}>
-                Highest budget risk: {topCategory.category} (
+                <Trans>Highest budget risk:</Trans>{' '}
+                {topCategory.category}
                 {topCategory.gap_to_budget != null
-                  ? `${topCategory.gap_to_budget >= 0 ? '+' : ''}$${topCategory.gap_to_budget.toFixed(0)} vs budget`
-                  : 'No budget comparison'}
-                )
+                  ? ` (${topCategory.gap_to_budget >= 0 ? '+' : ''}$${topCategory.gap_to_budget.toFixed(0)} vs budget)`
+                  : ''}
               </Text>
             )}
 
-            {/* Bars */}
             {topForecasts.map((item, idx) => {
-
               const value = item.forecast ?? 0;
               const widthPct =
-                maxForecast > 0
-                  ? Math.max((value / maxForecast) * 100, 2)
-                  : 0;
-
+                maxForecast > 0 ? Math.max((value / maxForecast) * 100, 2) : 0;
               const isTop = idx === 0;
-              const delta =
-                item.forecast != null && item.last_month != null
-                  ? item.forecast - item.last_month
-                  : null;
-
-              const deltaPct = delta != null && item.last_month
-                ? (delta / item.last_month) * 100
-                : null;
 
               return (
                 <View key={item.category} style={{gap: 4}}>
@@ -153,17 +132,18 @@ export function ForecastCard({
                       {item.gap_to_budget != null && (
                         <Text
                           style={{
-                            color: item.gap_to_budget > 0 ? '#ff7b7b' : '#7bffb0',
+                            color:
+                              item.gap_to_budget > 0 ? '#ff7b7b' : '#7bffb0',
                             fontWeight: 500,
                           }}
                         >
-                          {item.gap_to_budget > 0 ? '+' : ''}${item.gap_to_budget.toFixed(0)}
+                          {item.gap_to_budget > 0 ? '+' : ''}$
+                          {item.gap_to_budget.toFixed(0)}
                         </Text>
                       )}
                     </View>
                   </View>
 
-                  {/* Bar background */}
                   <View
                     style={{
                       height: 12,
@@ -172,7 +152,6 @@ export function ForecastCard({
                       overflow: 'hidden',
                     }}
                   >
-                    {/* Filled bar */}
                     <View
                       style={{
                         width: `${widthPct}%`,
@@ -189,11 +168,13 @@ export function ForecastCard({
             })}
 
             <Text style={{marginTop: 10, opacity: 0.6}}>
-              Model: {data.model_name}
+              <Trans>Model:</Trans> {data.model_name}
             </Text>
           </View>
         ) : (
-          <Text>Loading...</Text>
+          <Text>
+            <Trans>Loading...</Trans>
+          </Text>
         )}
       </View>
     </ReportCard>

@@ -6,17 +6,7 @@ export type DashboardPageEntity = {
   name: string;
   tombstone: boolean;
 };
-export type ForecastCard = {
-  id: string;
-  type: 'forecast-card';
-  width: number;
-  height: number;
-  x: number;
-  y: number;
-  meta: null;
-  dashboard_page_id: string;
-  tombstone?: boolean;
-};
+
 export type TimeFrame = {
   start: string;
   end: string;
@@ -141,6 +131,9 @@ type SpecializedWidget =
   | SankeyWidget
   | AgeOfMoneyWidget
   | ForecastCard;
+
+// ForecastCard uses AbstractWidget so tombstone is required (not optional)
+export type ForecastCard = AbstractWidget<'forecast-card', null>;
 export type DashboardWidgetEntity = SpecializedWidget | CustomReportWidget;
 export type NewDashboardWidgetEntity = Omit<
   DashboardWidgetEntity,
