@@ -1,10 +1,14 @@
-import { createApp } from '#server/app';
-import { aqlQuery } from '#server/aql';
+import {createApp} from '#server/app';
+import {aqlQuery} from '#server/aql';
+import { exportMonthlyCategoryHistory } from '../forecast/export-monthly-history';
+
+import * as sheet from '../sheet';
+import * as monthUtils from '#shared/months';
 import * as db from '#server/db';
-import { mutator } from '#server/mutators';
-import { undoable } from '#server/undo';
-import { q, Query } from '#shared/query';
-import type { QueryState } from '#shared/query';
+import {mutator} from '#server/mutators';
+import {undoable} from '#server/undo';
+import {q, Query} from '#shared/query';
+import type {QueryState} from '#shared/query';
 import type {
   AccountEntity,
   CategoryGroupEntity,
@@ -18,7 +22,7 @@ import type { ParseFileOptions } from './import/parse-file';
 import { logM1FeedbackBatch } from './ml-service';
 import { mergeTransactions } from './merge';
 
-import { batchUpdateTransactions } from '.';
+import {batchUpdateTransactions} from '.';
 
 export type TransactionHandlers = {
   'transactions-batch-update': typeof handleBatchUpdateTransactions;
@@ -33,15 +37,25 @@ export type TransactionHandlers = {
   'transactions-merge': typeof mergeTransactions;
   'get-earliest-transaction': typeof getEarliestTransaction;
   'get-latest-transaction': typeof getLatestTransaction;
+  'forecast-get-category-predictions': typeof getCategoryPredictions;
+  'forecast-export-monthly-history': typeof exportForecastMonthlyHistory;
 };
 
+async function exportForecastMonthlyHistory() {
+  const prefs = await import('#server/prefs');
+  const currentPrefs = prefs.getPrefs() || {};
+  const budgetId = currentPrefs.id || 'unknown-budget';
+
+  return exportMonthlyCategoryHistory(budgetId);
+}
+
 async function handleBatchUpdateTransactions({
-  added,
-  deleted,
-  updated,
-  learnCategories,
-  runTransfers = true,
-}: Parameters<typeof batchUpdateTransactions>[0]) {
+                                               added,
+                                               deleted,
+                                               updated,
+                                               learnCategories,
+                                               runTransfers = true,
+                                             }: Parameters<typeof batchUpdateTransactions>[0]) {
   const result = await batchUpdateTransactions({
     added,
     updated,
@@ -54,17 +68,17 @@ async function handleBatchUpdateTransactions({
 }
 
 async function addTransaction(transaction: TransactionEntity) {
-  await handleBatchUpdateTransactions({ added: [transaction] });
+  await handleBatchUpdateTransactions({added: [transaction]});
   return {};
 }
 
 async function updateTransaction(transaction: TransactionEntity) {
-  await handleBatchUpdateTransactions({ updated: [transaction] });
+  await handleBatchUpdateTransactions({updated: [transaction]});
   return {};
 }
 
 async function deleteTransaction(transaction: Pick<TransactionEntity, 'id'>) {
-  await handleBatchUpdateTransactions({ deleted: [transaction] });
+  await handleBatchUpdateTransactions({deleted: [transaction]});
   return {};
 }
 
@@ -81,35 +95,39 @@ async function moveTransaction({
   accountId,
   targetId,
 }: {
+  entries: Parameters<typeof logM1FeedbackBatch>[0];
+}) {
+  return logM1FeedbackBatch(entries);
+}
+
+async function moveTransaction({
+  id,
+  accountId,
+  targetId,
+}: {
   id: string;
   accountId: string;
   targetId: string | null;
 }) {
-  // Fetch the transaction to validate it exists and verify account
   const transaction = await db.getTransaction(id);
   if (!transaction) {
     throw new Error(`Transaction not found: ${id}`);
   }
 
-  // Validate that the provided accountId matches the transaction's actual account
-  // This prevents sort order calculations against the wrong account
   if (transaction.account !== accountId) {
     throw new Error(
       `Account mismatch: transaction belongs to account ${transaction.account}, not ${accountId}`,
     );
   }
 
-  // Child transactions can be reordered within their parent's children
-  // The db.moveTransaction handles the sibling-scoped reordering for children
-
   await db.moveTransaction(id, accountId, targetId);
   return {};
 }
 
 async function parseTransactionsFile({
-  filepath,
-  options,
-}: {
+                                       filepath,
+                                       options,
+                                     }: {
   filepath: string;
   options: ParseFileOptions;
 }) {
@@ -117,11 +135,11 @@ async function parseTransactionsFile({
 }
 
 async function exportTransactions({
-  transactions,
-  accounts,
-  categoryGroups,
-  payees,
-}: {
+                                    transactions,
+                                    accounts,
+                                    categoryGroups,
+                                    payees,
+                                  }: {
   transactions: TransactionEntity[];
   accounts: AccountEntity[];
   categoryGroups: CategoryGroupEntity[];
@@ -131,18 +149,18 @@ async function exportTransactions({
 }
 
 async function exportTransactionsQuery({
-  query: queryState,
-}: {
+                                         query: queryState,
+                                       }: {
   query: QueryState;
 }) {
   return exportQueryToCSV(new Query(queryState));
 }
 
 async function getEarliestTransaction() {
-  const { data } = await aqlQuery(
+  const {data} = await aqlQuery(
     q('transactions')
-      .options({ splits: 'none' })
-      .orderBy({ date: 'asc' })
+      .options({splits: 'none'})
+      .orderBy({date: 'asc'})
       .select('*')
       .limit(1),
   );
@@ -150,14 +168,311 @@ async function getEarliestTransaction() {
 }
 
 async function getLatestTransaction() {
-  const { data } = await aqlQuery(
+  const {data} = await aqlQuery(
     q('transactions')
-      .options({ splits: 'none' })
-      .orderBy({ date: 'desc' })
+      .options({splits: 'none'})
+      .orderBy({date: 'desc'})
       .select('*')
       .limit(1),
   );
   return data[0] || null;
+}
+
+const DEFAULT_M3_URL = 'http://129.114.26.3:8002';
+
+function getM3ServiceUrl(): string {
+  // Web Worker context — use same-origin Vite proxy to avoid COEP blocking
+  if (typeof self !== 'undefined' && typeof (self as any).importScripts === 'function') {
+    return `${(self as any).location.origin}/m3-api`;
+  }
+  return (
+    (typeof process !== 'undefined' && process.env?.M3_SERVICE_URL) ||
+    DEFAULT_M3_URL
+  );
+}
+
+function monthToNumber(yearMonth: string) {
+  return Number(yearMonth.slice(5, 7));
+}
+
+function quarterFromMonth(monthNum: number) {
+  return Math.floor((monthNum - 1) / 3) + 1;
+}
+
+function monthTrig(monthNum: number) {
+  const angle = (2 * Math.PI * monthNum) / 12;
+  return {
+    month_sin: Math.sin(angle),
+    month_cos: Math.cos(angle),
+  };
+}
+
+type ForecastFeatureRow = {
+  project_category: string;
+  monthly_spend: number;
+  lag_1: number;
+  lag_2: number;
+  lag_3: number;
+  lag_6: number;
+  rolling_mean_3: number;
+  rolling_std_3: number;
+  rolling_mean_6: number;
+  rolling_max_3: number;
+  history_month_count: number;
+  month_num: number;
+  quarter: number;
+  year: number;
+  is_q4: number;
+  month_sin: number;
+  month_cos: number;
+};
+
+async function getCategoryPredictions() {
+
+  const {data} = await aqlQuery(
+    q('transactions')
+      .options({splits: 'none'})
+      .select([
+        'id',
+        'date',
+        'amount',
+        'category',
+        'payee',
+        'account',
+        'transfer_id',
+      ]),
+  );
+
+
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(
+    now.getMonth() + 1,
+  ).padStart(2, '0')}`;
+
+  const {data: categoryRows} = await aqlQuery(
+    q('categories').select(['id', 'name']),
+  );
+
+  const sheetName = monthUtils.sheetForMonth(currentMonth);
+
+  function value(name: string) {
+    const v = sheet.get().getCellValue(sheetName, name);
+    return v === '' ? 0 : v;
+  }
+
+
+  const budgetMap = new Map<string, number>();
+
+  for (const cat of categoryRows) {
+    const value = sheet.get().getCellValue(sheetName, `budget-${cat.id}`);
+    budgetMap.set(cat.id, value === '' ? 0 : Number(value || 0));
+  }
+  if (!data || data.length === 0) {
+    return {forecasts: [], model_name: 'm3-forecast'};
+  }
+
+  const categoryIds = [
+    ...new Set(
+      data
+        .map((t: { category?: string | null }) => t.category)
+        .filter((c): c is string => !!c),
+    ),
+  ];
+
+  const categories = await Promise.all(
+    categoryIds.map(id => db.getCategory(id)),
+  );
+
+  const categoryMap = new Map(
+    categories.filter(Boolean).map(cat => [cat!.id, cat!.name]),
+  );
+
+  const filtered = data.filter(t => {
+    if (!t.category) return false;
+    if (t.transfer_id) return false;
+    if (!t.date) return false;
+
+    const amount = Number(t.amount || 0);
+
+    // remove income
+    if (amount > 0) return false;
+
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    return {forecasts: [], model_name: 'm3-forecast'};
+  }
+
+  const monthlyMap = new Map<string, number>();
+
+  for (const txn of filtered) {
+    const categoryName = categoryMap.get(txn.category);
+    if (!categoryName) continue;
+
+    const yearMonth = String(txn.date).slice(0, 7);
+
+    // Exclude the current in-progress month — it is a partial month and its
+    // spend is systematically lower than a full month, which biases lag_1 low
+    // (e.g. on April 18, only ~60% of April's spend is recorded).
+    // The model was trained on complete months only.
+    if (yearMonth === currentMonth) continue;
+
+    const amount = -Number(txn.amount || 0) / 100;
+
+    const key = `${categoryName}__${yearMonth}`;
+    monthlyMap.set(key, (monthlyMap.get(key) || 0) + amount);
+  }
+
+  const monthlyRows = [...monthlyMap.entries()].map(([key, monthly_spend]) => {
+    const [project_category, year_month] = key.split('__');
+    return {project_category, year_month, monthly_spend};
+  });
+
+  const byCategory = new Map<
+    string,
+    Array<{ year_month: string; monthly_spend: number }>
+  >();
+
+  for (const row of monthlyRows) {
+    if (!byCategory.has(row.project_category)) {
+      byCategory.set(row.project_category, []);
+    }
+    byCategory.get(row.project_category)!.push({
+      year_month: row.year_month,
+      monthly_spend: row.monthly_spend,
+    });
+  }
+
+  const featureRows: ForecastFeatureRow[] = [];
+
+  for (const [project_category, rows] of byCategory.entries()) {
+    rows.sort((a, b) => a.year_month.localeCompare(b.year_month));
+
+    if (rows.length < 3) {
+      continue;
+    }
+
+    const history = rows.map(r => r.monthly_spend);
+    const latest = rows[rows.length - 1];
+    const latestMonth = latest.year_month;
+
+    const lag = (k: number) =>
+      history.length - k - 1 >= 0
+        ? history[history.length - k - 1]
+        : 0;
+
+    const prior3 = history.slice(Math.max(0, history.length - 3));
+    const prior6 = history.slice(Math.max(0, history.length - 6));
+
+    const mean = (arr: number[]) =>
+      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+    const std = (arr: number[]) => {
+      if (arr.length <= 1) return 0;
+      const m = mean(arr);
+      const variance =
+        arr.reduce((acc, x) => acc + (x - m) ** 2, 0) / (arr.length - 1);
+      return Math.sqrt(variance);
+    };
+
+    const month_num = monthToNumber(latestMonth);
+    const quarter = quarterFromMonth(month_num);
+    const year = Number(latestMonth.slice(0, 4));
+    const is_q4 = [10, 11, 12].includes(month_num) ? 1 : 0;
+    const {month_sin, month_cos} = monthTrig(month_num);
+
+    // lag offsets match training convention in _build_supervised_rows:
+    //   monthly_spend = prior[-1]  → lag(0) = history[-1]
+    //   lag_1         = prior[-1]  → lag(0) = history[-1]  (same as monthly_spend)
+    //   lag_2         = prior[-2]  → lag(1) = history[-2]
+    //   lag_3         = prior[-3]  → lag(2) = history[-3]
+    //   lag_6         = prior[-6]  → lag(5) = history[-6]
+    featureRows.push({
+      project_category,
+      monthly_spend: latest.monthly_spend,
+      lag_1: lag(0),
+      lag_2: lag(1),
+      lag_3: lag(2),
+      lag_6: lag(5),
+      rolling_mean_3: mean(prior3),
+      rolling_std_3: std(prior3),
+      rolling_mean_6: mean(prior6),
+      rolling_max_3: prior3.length ? Math.max(...prior3) : 0,
+      history_month_count: rows.length,
+      month_num,
+      quarter,
+      year,
+      is_q4,
+      month_sin,
+      month_cos,
+    });
+  }
+
+  if (featureRows.length === 0) {
+    return {forecasts: [], model_name: 'm3-forecast'};
+  }
+
+  let result: { forecasts: Array<{ category: string; forecast: number | null }>; model_name: string };
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(`${getM3ServiceUrl()}/forecast/features`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rows: featureRows}),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw new Error(`M3 service returned ${response.status}`);
+    }
+    result = await response.json();
+  } catch (err) {
+    // M3 service down or timeout — return empty forecasts, don't crash UI
+    return {forecasts: [], model_name: 'm3-forecast'};
+  }
+
+  const enrichedForecasts = result.forecasts.map(
+    (forecast: { category: string; forecast: number | null }) => {
+      const match = featureRows.find(
+        row => row.project_category === forecast.category,
+      );
+
+      const categoryId = [...categoryMap.entries()].find(
+        ([, name]) => name === forecast.category,
+      )?.[0];
+
+      const budgeted =
+        categoryId && budgetMap.has(categoryId)
+          ? Number(budgetMap.get(categoryId)) / 100
+          : 0;
+
+      const gap_to_budget =
+        forecast.forecast != null ? forecast.forecast - budgeted : null;
+
+      return {
+        ...forecast,
+        // lag_1 = current month (same as monthly_spend after fix)
+        // lag_2 = actual previous month spend
+        last_month: match ? match.lag_2 : null,
+        budgeted,
+        gap_to_budget,
+      };
+    },
+  );
+
+  const sortedForecasts = [...enrichedForecasts].sort((a, b) => {
+    const aGap = a.gap_to_budget ?? Number.NEGATIVE_INFINITY;
+    const bGap = b.gap_to_budget ?? Number.NEGATIVE_INFINITY;
+    return bGap - aGap;
+  });
+
+  return {
+    forecasts: sortedForecasts,
+    model_name: result.model_name,
+  };
 }
 
 export const app = createApp<TransactionHandlers>();
@@ -178,3 +493,5 @@ app.method('transactions-export', mutator(exportTransactions));
 app.method('transactions-export-query', mutator(exportTransactionsQuery));
 app.method('get-earliest-transaction', getEarliestTransaction);
 app.method('get-latest-transaction', getLatestTransaction);
+app.method('forecast-get-category-predictions', getCategoryPredictions);
+app.method('forecast-export-monthly-history', exportForecastMonthlyHistory);

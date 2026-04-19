@@ -2,10 +2,10 @@
 
 import * as connection from '#platform/server/connection';
 import * as db from '#server/db';
-import { incrFetch, whereIn } from '#server/db/util';
-import { batchMessages } from '#server/sync';
-import type { Diff } from '#shared/util';
-import type { PayeeEntity, TransactionEntity } from '#types/models';
+import {incrFetch, whereIn} from '#server/db/util';
+import {batchMessages} from '#server/sync';
+import type {Diff} from '#shared/util';
+import type {PayeeEntity, TransactionEntity} from '#types/models';
 
 import * as rules from './transaction-rules';
 import * as transfer from './transfer';
@@ -13,7 +13,9 @@ import * as transfer from './transfer';
 async function idsWithChildren(ids: string[]) {
   const whereIds = whereIn(ids, 'parent_id');
   const rows = await db.all<Pick<db.DbViewTransactionInternal, 'id'>>(
-    `SELECT id FROM v_transactions_internal WHERE ${whereIds}`,
+    `SELECT id
+     FROM v_transactions_internal
+     WHERE ${whereIds}`,
   );
   const set = new Set(ids);
   for (const row of rows) {
@@ -33,18 +35,22 @@ async function getTransactionsByIds(
     ids,
 
     id => `id = '${id}'`,
-    where => `SELECT * FROM v_transactions_internal WHERE ${where}`,
+    where => `SELECT *
+              FROM v_transactions_internal
+              WHERE ${where}`,
   );
 }
 
+
+
 export async function batchUpdateTransactions({
-  added,
-  deleted,
-  updated,
-  learnCategories = false,
-  detectOrphanPayees = true,
-  runTransfers = true,
-}: Partial<Diff<TransactionEntity>> & {
+                                                added,
+                                                deleted,
+                                                updated,
+                                                learnCategories = false,
+                                                detectOrphanPayees = true,
+                                                runTransfers = true,
+                                              }: Partial<Diff<TransactionEntity>> & {
   learnCategories?: boolean;
   detectOrphanPayees?: boolean;
   runTransfers?: boolean;
@@ -86,6 +92,7 @@ export async function batchUpdateTransactions({
           if (t.is_parent || account?.offbudget === 1) {
             t.category = null;
           }
+
           return db.insertTransaction(t);
         }),
       );
@@ -98,7 +105,7 @@ export async function batchUpdateTransactions({
         // inconsistency of the delete APIs is annoying and should
         // be fixed (it should only take an id)
         deletedIds.map(async id => {
-          await db.deleteTransaction({ id });
+          await db.deleteTransaction({id});
         }),
       );
     }

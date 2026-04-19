@@ -129,7 +129,11 @@ type SpecializedWidget =
   | CalendarWidget
   | FormulaWidget
   | SankeyWidget
-  | AgeOfMoneyWidget;
+  | AgeOfMoneyWidget
+  | ForecastCard;
+
+// ForecastCard uses AbstractWidget so tombstone is required (not optional)
+export type ForecastCard = AbstractWidget<'forecast-card', null>;
 export type DashboardWidgetEntity = SpecializedWidget | CustomReportWidget;
 export type NewDashboardWidgetEntity = Omit<
   DashboardWidgetEntity,

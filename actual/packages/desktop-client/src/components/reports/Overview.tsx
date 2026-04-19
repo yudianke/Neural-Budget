@@ -68,6 +68,7 @@ import { MissingReportCard } from './reports/MissingReportCard';
 import { NetWorthCard } from './reports/NetWorthCard';
 import { SankeyCard } from './reports/SankeyCard';
 import { SpendingCard } from './reports/SpendingCard';
+import { ForecastCard } from './reports/ForecastCard';
 import { SummaryCard } from './reports/SummaryCard';
 
 function isCustomReportWidget(
@@ -268,6 +269,18 @@ export function Overview({ dashboard }: OverviewProps) {
     type: T['type'],
     meta: T['meta'] = null,
   ) => {
+    if (type === 'forecast-card') {
+    addDashboardWidgetMutation.mutate({
+      widget: {
+        type,
+        width: 4,
+        height: 5, // bigger height
+        meta,
+        dashboard_page_id: dashboard.id,
+      },
+    });
+    return;
+  }
     addDashboardWidgetMutation.mutate({
       widget: {
         type,
@@ -611,6 +624,10 @@ export function Overview({ dashboard }: OverviewProps) {
                               text: t('Summary card'),
                             },
                             {
+                              name: 'forecast-card' as const,
+                              text: t('Forecast card'),
+                            },
+                            {
                               name: 'calendar-card' as const,
                               text: t('Calendar card'),
                             },
@@ -897,6 +914,17 @@ export function Overview({ dashboard }: OverviewProps) {
                             onCopy={targetDashboardId =>
                               onCopyWidget(item.i, targetDashboardId)
                             }
+                          />
+                          ) : widget.type === 'forecast-card' ? (
+                          <ForecastCard
+                            widgetId={item.i}
+                            isEditing={isEditing}
+                            meta={widget.meta}
+                            onMetaChange={newMeta => onMetaChange(item, newMeta)}
+                            onRemove={() => onRemoveWidget(item.i)}
+                            onCopy={targetDashboardId =>
+                            onCopyWidget(item.i, targetDashboardId)
+                              }
                           />
                         ) : widget.type === 'calendar-card' ? (
                           <CalendarCard

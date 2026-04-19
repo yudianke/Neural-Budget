@@ -2,7 +2,7 @@
   "mtbi_path": "data/raw/mtbi241x.csv",
   "fmli_path": "data/raw/fmli241x.csv",
   "moneydata_path": "data/raw/moneydata.csv",
-  "output_dir": "data/processed",
+  "output_dir": "processed",
   "n_synthetic_users": 3000,
   "random_seed": 42,
   "persona_clusters": 5,

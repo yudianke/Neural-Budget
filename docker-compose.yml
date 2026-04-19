@@ -46,7 +46,7 @@ services:
       start_period: 30s
 
   # --------------------------------------------------------------------------
-  # Retrain Daemon
+  # Retrain Daemon (M1)
   # --------------------------------------------------------------------------
   retrain-daemon:
     build:
@@ -80,6 +80,32 @@ services:
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
+  # M3 Forecast Serving
+  # --------------------------------------------------------------------------
+  m3-serving:
+    build:
+      context: ./serving/m3
+      dockerfile: Dockerfile
+    image: m3-serving:latest
+    container_name: m3-serving
+    ports:
+      - "8002:8002"
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M3_REGISTERED_MODEL: "m3-forecast"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
   # Prometheus
   # --------------------------------------------------------------------------
   prometheus:

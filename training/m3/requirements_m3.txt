@@ -4,3 +4,7 @@ mlflow
 pyyaml
 prophet
 scipy
+prometheus-client
+psycopg2-binary
+sqlalchemy
+scikit-learn==1.6.1
