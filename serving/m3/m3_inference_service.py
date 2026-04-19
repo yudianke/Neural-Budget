@@ -1,13 +1,13 @@
 """
 M3 Forecast Inference Service
 
-Loads the latest registered m3-forecast-v2 bundle from MLflow at startup
+Loads the latest registered m3-forecast bundle from MLflow at startup
 (same pattern as M1's real_model.py). Exposes /forecast/features for the
 ActualBudget backend worker to call.
 
 Environment variables:
     MLFLOW_TRACKING_URI     MLflow server URL
-    M3_REGISTERED_MODEL     MLflow model name (default: m3-forecast-v2)
+    M3_REGISTERED_MODEL     MLflow model name (default: m3-forecast)
     M3_MODEL_VERSION        Pin a specific version (optional, default: latest)
 
 Endpoints:
@@ -41,7 +41,7 @@ logger = logging.getLogger("m3_service")
 # Config
 # ---------------------------------------------------------------------------
 MLFLOW_URI   = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
-MODEL_NAME   = os.environ.get("M3_REGISTERED_MODEL", "m3-forecast-v2")
+MODEL_NAME   = os.environ.get("M3_REGISTERED_MODEL", "m3-forecast")
 MODEL_VER    = os.environ.get("M3_MODEL_VERSION")   # None = latest
 
 # ---------------------------------------------------------------------------

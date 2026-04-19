@@ -397,26 +397,26 @@ def main() -> None:
     save_csv(forecasting_eval, batch_dir / "forecasting_eval.csv")
 
     # Forecasting dataset v2 (personalized, time-aware supervised rows)
-    forecasting_v2_df = add_monthly_forecast_features(
+    forecasting_df = add_monthly_forecast_features(
         monthly_spend=monthly_spend,
         users=users,
         min_history_months=3,
     )
 
-    v2_unique_months = sorted(forecasting_v2_df["year_month"].unique().tolist())
+    v2_unique_months = sorted(forecasting_df["year_month"].unique().tolist())
     v2_split_month_idx = max(1, int(len(v2_unique_months) * 0.8))
     v2_train_months = set(v2_unique_months[:v2_split_month_idx])
     v2_eval_months = set(v2_unique_months[v2_split_month_idx:])
 
-    forecasting_v2_train = forecasting_v2_df[
-        forecasting_v2_df["year_month"].isin(v2_train_months)
+    forecasting_train = forecasting_df[
+        forecasting_df["year_month"].isin(v2_train_months)
     ].copy()
-    forecasting_v2_eval = forecasting_v2_df[
-        forecasting_v2_df["year_month"].isin(v2_eval_months)
+    forecasting_eval = forecasting_df[
+        forecasting_df["year_month"].isin(v2_eval_months)
     ].copy()
 
-    save_csv(forecasting_v2_train, batch_dir / "forecasting_v2_train.csv")
-    save_csv(forecasting_v2_eval, batch_dir / "forecasting_v2_eval.csv")
+    save_csv(forecasting_train, batch_dir / "forecasting_train.csv")
+    save_csv(forecasting_eval, batch_dir / "forecasting_eval.csv")
 
     # Save batch manifest
     batch_manifest = {
@@ -427,8 +427,7 @@ def main() -> None:
         "selection_rules": {
             "categorization": "All transactions with required fields; chronological 80/20 split.",
             "anomaly": "Only users with >= 20 transactions; rolling history features computed from prior transactions only; chronological 80/20 split.",
-            "forecasting": "Monthly aggregation by user and category; split by month to avoid future leakage.",
-            "forecasting_v2": "Supervised next-month user-category forecasting rows with lag and rolling features computed from prior months only; chronological month split.",
+            "forecasting": "Supervised next-month user-category forecasting rows with lag and rolling features computed from prior months only; chronological month split.",
         },
         "leakage_prevention": [
             "No random split for time-dependent data.",
@@ -444,8 +443,8 @@ def main() -> None:
             dataset_summary(anomaly_eval, "anomaly_eval"),
             dataset_summary(forecasting_train, "forecasting_train"),
             dataset_summary(forecasting_eval, "forecasting_eval"),
-            dataset_summary(forecasting_v2_train, "forecasting_v2_train"),
-            dataset_summary(forecasting_v2_eval, "forecasting_v2_eval"),
+            dataset_summary(forecasting_train, "forecasting_train"),
+            dataset_summary(forecasting_eval, "forecasting_eval"),
         ],
         "outputs": [
             "categorization_train.csv",
@@ -454,8 +453,8 @@ def main() -> None:
             "anomaly_eval.csv",
             "forecasting_train.csv",
             "forecasting_eval.csv",
-            "forecasting_v2_train.csv",
-            "forecasting_v2_eval.csv",
+            "forecasting_train.csv",
+            "forecasting_eval.csv",
         ],
     }
 

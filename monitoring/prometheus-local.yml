@@ -13,6 +13,13 @@ scrape_configs:
     metrics_path: /metrics
     scrape_interval: 15s
 
+  # m3 server runs as nohup process on host port 8002
+  - job_name: "m3-serving"
+    static_configs:
+      - targets: ["host.docker.internal:8002"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]

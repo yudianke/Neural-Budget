@@ -11,6 +11,7 @@ services:
     environment:
       - HTTPS
       - M1_SERVICE_URL=http://host.docker.internal:8001
+      - M3_SERVICE_URL=http://host.docker.internal:8002
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

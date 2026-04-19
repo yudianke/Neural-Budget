@@ -1,5 +1,5 @@
 """
-M3 Forecast Training — v2 (HistGradientBoostingRegressor)
+M3 Forecast Training (HistGradientBoostingRegressor)
 
 Usage:
     python train_m3_v2.py
@@ -10,7 +10,7 @@ Environment variables:
 
 Outputs:
     - MLflow run with metrics, params, artifacts
-    - Registers new model version in MLflow registry (m3-forecast-v2) if quality gate passes
+    - Registers new model version in MLflow registry (m3-forecast) if quality gate passes
     - No local file artifacts — serving loads from MLflow
 """
 import os
@@ -32,15 +32,15 @@ from sklearn.metrics import mean_absolute_error
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
-DATA_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_v2_train.csv"
-EVAL_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_v2_eval.csv"
+DATA_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_train.csv"
+EVAL_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_eval.csv"
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
-MODEL_NAME       = "m3-forecast-v2"
-EXPERIMENT_NAME  = "m3-forecast-v2"
+MODEL_NAME       = "m3-forecast"
+EXPERIMENT_NAME  = "m3-forecast"
 MAE_GATE         = float(os.environ.get("M3_GATE_MAE", "150.0"))
 
 # Features that cannot be computed from real ActualBudget data at inference time.
@@ -158,7 +158,7 @@ def main():
         # Log bundle as MLflow artifact (serving loads from here, not local disk)
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            bundle_path = Path(tmpdir) / "m3_v2_bundle.joblib"
+            bundle_path = Path(tmpdir) / "m3_bundle.joblib"
             bundle = {
                 "model": model,
                 "feature_columns": feature_columns,

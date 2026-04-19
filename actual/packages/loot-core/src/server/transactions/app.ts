@@ -258,7 +258,7 @@ async function getCategoryPredictions() {
     budgetMap.set(cat.id, value === '' ? 0 : Number(value || 0));
   }
   if (!data || data.length === 0) {
-    return {forecasts: [], model_name: 'm3-forecast-v2'};
+    return {forecasts: [], model_name: 'm3-forecast'};
   }
 
   const categoryIds = [
@@ -291,7 +291,7 @@ async function getCategoryPredictions() {
   });
 
   if (filtered.length === 0) {
-    return {forecasts: [], model_name: 'm3-forecast-v2'};
+    return {forecasts: [], model_name: 'm3-forecast'};
   }
 
   const monthlyMap = new Map<string, number>();
@@ -387,7 +387,7 @@ async function getCategoryPredictions() {
   }
 
   if (featureRows.length === 0) {
-    return {forecasts: [], model_name: 'm3-forecast-v2'};
+    return {forecasts: [], model_name: 'm3-forecast'};
   }
 
   let result: { forecasts: Array<{ category: string; forecast: number | null }>; model_name: string };
@@ -408,7 +408,7 @@ async function getCategoryPredictions() {
     result = await response.json();
   } catch (err) {
     // M3 service down or timeout — return empty forecasts, don't crash UI
-    return {forecasts: [], model_name: 'm3-forecast-v2'};
+    return {forecasts: [], model_name: 'm3-forecast'};
   }
 
   const enrichedForecasts = result.forecasts.map(

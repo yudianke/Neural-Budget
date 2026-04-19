@@ -21,7 +21,7 @@ cd "$REPO_ROOT"
 python3 data_pipeline/batch_pipeline.py
 
 # Step 2: Train new model with quality gate + MLflow registration
-echo "[M3-retrain] Training m3_v2..."
+echo "[M3-retrain] Training M3 forecast model..."
 MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
   python3 "$SCRIPT_DIR/train_m3_v2.py"
 
