@@ -62,14 +62,17 @@ function CategoryRow({
   const budgetedPct = Math.min((budgeted / (scale || 1)) * 100, 100);
   const lastPct = Math.min((lastMonth / (scale || 1)) * 100, 100);
 
-  const overBudget = gap != null && gap > 0;
-  const underBudget = gap != null && gap < 0;
+  const hasBudget = budgeted > 0;
+  const overBudget = hasBudget && gap != null && gap > 0;
+  const underBudget = hasBudget && gap != null && gap < 0;
 
-  const barColor = isTop
-    ? theme.reportsNumberNegative
-    : overBudget
+  // Only color red/green when there is an actual budget target to compare against.
+  // Without a budget, use neutral blue — no false alarms.
+  const barColor = hasBudget
+    ? overBudget
       ? theme.reportsRed
-      : theme.reportsGreen;
+      : theme.reportsGreen
+    : theme.reportsBlue;
 
   const gapColor = overBudget
     ? theme.reportsNumberNegative
@@ -100,6 +103,17 @@ function CategoryRow({
         </Text>
 
         <View style={{flexDirection: 'row', gap: 10, alignItems: 'baseline'}}>
+          {/* Budget — explicit numeric reference */}
+          <Text
+            style={{
+              fontSize: 11,
+              color: theme.reportsBlue,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            Budget {fmt(budgeted)}
+          </Text>
+
           {/* Last month — muted reference */}
           {lastMonth > 0 && (
             <Text
@@ -109,7 +123,7 @@ function CategoryRow({
                 fontVariantNumeric: 'tabular-nums',
               }}
             >
-              {fmt(lastMonth)}
+              Last month {fmt(lastMonth)}
             </Text>
           )}
 
@@ -122,7 +136,7 @@ function CategoryRow({
               fontVariantNumeric: 'tabular-nums',
             }}
           >
-            {item.forecast != null ? fmt(forecast) : '—'}
+            Forecast {item.forecast != null ? fmt(forecast) : '—'}
           </Text>
 
           {/* Gap chip */}

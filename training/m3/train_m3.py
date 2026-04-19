@@ -113,6 +113,11 @@ DROP_AT_TRAIN = [
     "user_total_lag_1",
     "user_total_rolling_mean_3",
     "category_share_lag_1",
+    # Budget field — not available in synthetic training data and always 0 in the
+    # inference service's ForecastFeatureRow schema (ActualBudget budget targets
+    # are read separately in app.ts and compared post-inference, not fed into the
+    # model). Including it in training on zeroed values causes systematic bias.
+    "budgeted",
 ]
 
 

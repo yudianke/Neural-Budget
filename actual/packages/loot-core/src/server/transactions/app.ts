@@ -241,23 +241,31 @@ async function getCategoryPredictions() {
     now.getMonth() + 1,
   ).padStart(2, '0')}`;
 
+  // M3 forecasts NEXT month's spend, so budget targets should be read from
+  // next month's sheet — not the current month's sheet.
+  const nextMonth = monthUtils.addMonths(currentMonth, 1);
+
   const {data: categoryRows} = await aqlQuery(
     q('categories').select(['id', 'name']),
   );
 
-  const sheetName = monthUtils.sheetForMonth(currentMonth);
+  const nextMonthSheetName = monthUtils.sheetForMonth(nextMonth);
 
-  function value(name: string) {
-    const v = sheet.get().getCellValue(sheetName, name);
-    return v === '' ? 0 : v;
-  }
-
+  // Build budgetMap keyed by category id → next-month budgeted amount (dollars).
+  // Falls back to current month if next month has no budget entry, so the gap
+  // is still meaningful for users who copy budgets forward.
+  const currentSheetName = monthUtils.sheetForMonth(currentMonth);
 
   const budgetMap = new Map<string, number>();
 
   for (const cat of categoryRows) {
-    const value = sheet.get().getCellValue(sheetName, `budget-${cat.id}`);
-    budgetMap.set(cat.id, value === '' ? 0 : Number(value || 0));
+    const nextVal = sheet.get().getCellValue(nextMonthSheetName, `budget-${cat.id}`);
+    const currVal = sheet.get().getCellValue(currentSheetName, `budget-${cat.id}`);
+    // Prefer next month; fall back to current month; 0 if neither is set.
+    const raw = nextVal !== '' && Number(nextVal || 0) !== 0
+      ? nextVal
+      : currVal;
+    budgetMap.set(cat.id, raw === '' ? 0 : Number(raw || 0));
   }
   if (!data || data.length === 0) {
     return {forecasts: [], model_name: 'm3-forecast'};
@@ -430,15 +438,28 @@ async function getCategoryPredictions() {
     return {forecasts: [], model_name: 'm3-forecast'};
   }
 
+  // Normalize category names for case-insensitive, underscore-tolerant matching.
+  // M3 training data uses lowercase underscore names ("personal_care"),
+  // ActualBudget DB uses TitleCase space names ("Personal Care").
+  // M1 has a full CATEGORY_ALIASES map; M3 at minimum needs this normalization.
+  const normalizeCatName = (s: string) =>
+    s.replace(/_/g, ' ').trim().toLowerCase();
+
+  // Pre-build a normalized lookup: normalizedName → categoryId
+  const normalizedCategoryMap = new Map<string, string>();
+  for (const [id, name] of categoryMap.entries()) {
+    normalizedCategoryMap.set(normalizeCatName(name), id);
+  }
+
   const enrichedForecasts = result.forecasts.map(
     (forecast: { category: string; forecast: number | null }) => {
+      const normalizedForecastCat = normalizeCatName(forecast.category);
+
       const match = featureRows.find(
-        row => row.project_category === forecast.category,
+        row => normalizeCatName(row.project_category) === normalizedForecastCat,
       );
 
-      const categoryId = [...categoryMap.entries()].find(
-        ([, name]) => name === forecast.category,
-      )?.[0];
+      const categoryId = normalizedCategoryMap.get(normalizedForecastCat);
 
       const budgeted =
         categoryId && budgetMap.has(categoryId)
@@ -446,7 +467,9 @@ async function getCategoryPredictions() {
           : 0;
 
       const gap_to_budget =
-        forecast.forecast != null ? forecast.forecast - budgeted : null;
+        forecast.forecast != null && budgeted > 0
+          ? forecast.forecast - budgeted
+          : null;
 
       return {
         ...forecast,
