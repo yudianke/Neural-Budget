@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: "neural-budget"
+    env: "production"
+
+scrape_configs:
+  # M1 serving — FastAPI metrics via prometheus-fastapi-instrumentator
+  - job_name: "m1-serving"
+    static_configs:
+      - targets: ["m1-serving:8001"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # M2 anomaly detection serving
+  - job_name: "m2-serving"
+    static_configs:
+      - targets: ["m2-serving:8002"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

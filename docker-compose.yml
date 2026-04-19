@@ -1,14 +1,22 @@
-# NeuralBudget ML Stack
-# ---------------------
-# Usage:  docker compose up -d --build
+# NeuralBudget — Full Stack
+# -------------------------
+# Usage:  docker-compose up -d --build
 #
-# Prerequisites on host:
-#   /home/cc/Neural-Budget/training/m1/data/moneydata.csv
+# Starts everything with one command:
+#   ActualBudget dev UI  → http://localhost:3001
+#   M1 Categorization    → http://localhost:8001
+#   M2 Anomaly Detection → http://localhost:8003
+#   M3 Forecasting       → http://localhost:8002
+#   Prometheus           → http://localhost:9090
+#   Grafana              → http://localhost:3000  (admin / neuralbudget)
+#
+# Prerequisites:
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY exported in the shell
 #   or stored in a local .env file (not committed)
 
 volumes:
   feedback_data:
+  m2_feedback_data:
   m3_feedback_data:
   m3_state_data:
   prometheus_data:
@@ -72,12 +80,70 @@ services:
       AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
     volumes:
       - feedback_data:/data/feedback
-      - /home/cc/Neural-Budget/training/m1/data/moneydata.csv:/data/moneydata.csv:ro
+      - ${MONEYDATA_PATH:-/tmp/moneydata_placeholder}:/data/moneydata.csv:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - ml-net
     depends_on:
       m1-serving:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # M2 Anomaly Detection Serving
+  # --------------------------------------------------------------------------
+  m2-serving:
+    build:
+      context: ./serving/m2_onnx_multiworker
+      dockerfile: Dockerfile
+    image: m2-serving:latest
+    container_name: m2-serving
+    ports:
+      - "8003:8003"
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M2_CONTAMINATION: "${M2_CONTAMINATION:-0.05}"
+      M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
+      PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc_m2"
+    volumes:
+      - m2_feedback_data:/data/feedback
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # M2 Retrain Daemon
+  # --------------------------------------------------------------------------
+  m2-retrain-daemon:
+    build:
+      context: .
+      dockerfile: training/m2/Dockerfile.daemon
+    image: m2-retrain-daemon:latest
+    container_name: m2-retrain-daemon
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M2_SERVING_URL: "http://m2-serving:8003"
+      M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
+      M2_DAEMON_STATE_PATH: "/data/feedback/m2_daemon_state.json"
+      M2_CONFIG: "/app/training/m2/config_m2.yaml"
+      M2_BOOTSTRAP_DATA_PATH: "/data/anomaly_train.csv"
+      CHECK_INTERVAL_SECONDS: "300"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    volumes:
+      - m2_feedback_data:/data/feedback
+    networks:
+      - ml-net
+    depends_on:
+      m2-serving:
         condition: service_healthy
     restart: unless-stopped
 
@@ -145,6 +211,8 @@ services:
       m3-serving:
         condition: service_healthy
     restart: unless-stopped
+
+  # --------------------------------------------------------------------------
   # Prometheus
   # --------------------------------------------------------------------------
   prometheus:
@@ -187,4 +255,40 @@ services:
       - ml-net
     depends_on:
       - prometheus
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # ActualBudget — dev UI
+  # ML service URLs point to container names on ml-net (not host.docker.internal)
+  # --------------------------------------------------------------------------
+  actual-development:
+    build:
+      context: ./actual
+      dockerfile: Dockerfile
+    image: actual-development
+    container_name: actual-development
+    environment:
+      - HTTPS
+      - M1_SERVICE_URL=http://m1-serving:8001
+      - M2_SERVICE_URL=http://m2-serving:8003
+      - M3_SERVICE_URL=http://m3-serving:8002
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./actual:/app
+      - /app/node_modules
+      - /app/packages/loot-core/node_modules
+      - /app/packages/desktop-client/node_modules
+      - /app/packages/component-library/node_modules
+      - /app/packages/crdt/node_modules
+      - /app/packages/sync-server/node_modules
+      - /app/packages/api/node_modules
+      - /app/packages/desktop-electron/node_modules
+      - /app/packages/plugins-service/node_modules
+    networks:
+      - ml-net
+    depends_on:
+      - m1-serving
+      - m2-serving
+      - m3-serving
     restart: unless-stopped

@@ -6,29 +6,120 @@ Port: 8002
 Model: sklearn Pipeline(StandardScaler + IsolationForest) exported to ONNX
 Features (6, in order): abs_amount, repeat_count, is_recurring_candidate,
                          user_txn_index, user_mean_abs_amount_prior, user_std_abs_amount_prior
+
+Close-the-loop endpoints:
+  POST /feedback                           — log dismiss / confirm feedback
+  GET  /metrics/feedback                   — aggregate feedback stats
+  GET  /metrics/feedback/since/{version}   — feedback stats for a model version
+  POST /admin/reload                       — hot-reload ONNX model from disk
+  GET  /health                             — includes model_version
 """
+
+import json
+import logging
 import os
-from typing import Optional
+import sys
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Literal, Optional
 
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from prometheus_client import Counter, Gauge, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, ConfigDict
 
-# contamination used at train time (config_m2.yaml); only informational in output
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 CONTAMINATION = float(os.environ.get("M2_CONTAMINATION", "0.05"))
-MODEL_VERSION = "m2_isolation_forest_v1"
+DEFAULT_FEEDBACK_LOG_PATH = "/data/feedback/m2_feedback.jsonl"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
 
-_model_path = os.path.join(os.path.dirname(__file__), "model.onnx")
-session = ort.InferenceSession(_model_path, providers=["CPUExecutionProvider"])
-_input_name = session.get_inputs()[0].name
+logging.basicConfig(
+    level=logging.INFO,
+    format="[M2-SERVING %(asctime)s] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("m2_serving")
+
+# ---------------------------------------------------------------------------
+# Model state (mutable, protected by lock for hot-reload)
+# ---------------------------------------------------------------------------
+_model_lock = threading.Lock()
+_session: ort.InferenceSession | None = None
+_input_name: str = ""
+_model_version: str = "m2_isolation_forest_v1"
+
+
+def _load_model(path: str | None = None) -> None:
+    global _session, _input_name, _model_version
+    target = path or MODEL_PATH
+    sess = ort.InferenceSession(target, providers=["CPUExecutionProvider"])
+    inp_name = sess.get_inputs()[0].name
+    with _model_lock:
+        _session = sess
+        _input_name = inp_name
+    log.info(f"Model loaded from {target}, version={_model_version}")
+
+
+_load_model()
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+M2_PREDICTIONS = Counter(
+    "m2_predictions_total",
+    "Total M2 anomaly predictions",
+    ["badge_type"],
+)
+M2_ANOMALY_SCORE = Histogram(
+    "m2_anomaly_score",
+    "Distribution of M2 anomaly decision-function scores",
+    buckets=[-0.5, -0.3, -0.2, -0.1, 0.0, 0.05, 0.1, 0.2, 0.3, 0.5],
+)
+M2_DISMISSALS = Counter(
+    "m2_dismissals_total",
+    "Number of anomaly dismissals (false positives)",
+    ["badge_type"],
+)
+M2_CONFIRMS = Counter(
+    "m2_confirms_total",
+    "Number of confirmed anomalies",
+)
+M2_DISMISS_RATE = Gauge(
+    "m2_dismiss_rate",
+    "Rolling dismiss rate (dismissals / total feedback)",
+)
+M2_ANOMALY_RATE = Gauge(
+    "m2_anomaly_rate",
+    "Fraction of predictions flagged as anomaly",
+)
+M2_MODEL_VERSION = Gauge(
+    "m2_model_version_numeric",
+    "Currently loaded model version as integer (0 if non-numeric)",
+)
+
+
+def _update_version_gauge():
+    try:
+        v = _model_version.split("_v")[-1] if "_v" in _model_version else "0"
+        M2_MODEL_VERSION.set(int(v))
+    except (ValueError, TypeError):
+        M2_MODEL_VERSION.set(0)
+
+
+_update_version_gauge()
 
 
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-
 class M2Input(BaseModel):
     transaction_id: str
     synthetic_user_id: str
@@ -65,14 +156,124 @@ class M2Output(BaseModel):
     model_version: str
 
 
+class M2FeedbackEntry(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    transaction_id: str
+    feedback_type: Literal["dismiss_false_positive", "confirmed_anomaly"]
+    badge_type: Optional[str] = None
+    anomaly_score: Optional[float] = None
+    rule_flags: Optional[dict] = None
+    merchant: Optional[str] = None
+    amount: Optional[float] = None
+    date: Optional[str] = None
+    source: str = "actual"
+    logged_at: Optional[str] = None
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
+
+
+class M2FeedbackBatch(BaseModel):
+    entries: List[M2FeedbackEntry]
+
+
+# ---------------------------------------------------------------------------
+# Feedback persistence
+# ---------------------------------------------------------------------------
+def _feedback_log_path() -> Path:
+    return Path(os.environ.get("M2_FEEDBACK_LOG_PATH", DEFAULT_FEEDBACK_LOG_PATH))
+
+
+def log_feedback(entries: list[M2FeedbackEntry]) -> int:
+    path = _feedback_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("a", encoding="utf-8") as fh:
+        for entry in entries:
+            payload = entry.model_dump()
+            if not payload.get("logged_at"):
+                payload["logged_at"] = datetime.now(timezone.utc).isoformat()
+            if not payload.get("model_name"):
+                payload["model_name"] = "m2-anomaly"
+            if not payload.get("model_version"):
+                payload["model_version"] = _model_version
+            fh.write(json.dumps(payload) + "\n")
+            count += 1
+    return count
+
+
+def get_feedback_stats(since_version: str | None = None) -> dict:
+    path = _feedback_log_path()
+    if not path.exists():
+        return {
+            "total": 0,
+            "dismissals": 0,
+            "confirms": 0,
+            "dismiss_rate": 0.0,
+            "per_rule_dismiss": {},
+            "current_version": _model_version,
+            "filter_version": since_version,
+        }
+
+    total, dismissals, confirms = 0, 0, 0
+    rule_dismiss: dict[str, int] = {}
+
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since_version and row.get("model_version") != since_version:
+                continue
+            total += 1
+            if row.get("feedback_type") == "dismiss_false_positive":
+                dismissals += 1
+                bt = row.get("badge_type", "unknown")
+                rule_dismiss[bt] = rule_dismiss.get(bt, 0) + 1
+            elif row.get("feedback_type") == "confirmed_anomaly":
+                confirms += 1
+
+    rate = dismissals / total if total > 0 else 0.0
+    return {
+        "total": total,
+        "dismissals": dismissals,
+        "confirms": confirms,
+        "dismiss_rate": round(rate, 4),
+        "per_rule_dismiss": rule_dismiss,
+        "current_version": _model_version,
+        "filter_version": since_version,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Prediction counters for anomaly_rate gauge
+# ---------------------------------------------------------------------------
+_prediction_counts = {"total": 0, "anomaly": 0}
+_count_lock = threading.Lock()
+
+
+def _record_prediction(is_anomaly: bool) -> None:
+    with _count_lock:
+        _prediction_counts["total"] += 1
+        if is_anomaly:
+            _prediction_counts["anomaly"] += 1
+        total = _prediction_counts["total"]
+        anom = _prediction_counts["anomaly"]
+    if total > 0:
+        M2_ANOMALY_RATE.set(round(anom / total, 4))
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-
 app = FastAPI(
     title="NeuralBudget M2 Anomaly Detection Service",
-    version="1.0.0",
-    description="Async anomaly scoring for transactions (IsolationForest + rules).",
+    version="2.0.0",
+    description="Async anomaly scoring for transactions (IsolationForest + rules) with close-the-loop feedback.",
 )
 
 app.add_middleware(
@@ -83,24 +284,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+Instrumentator().instrument(app).expose(app)
 
+
+# ---------------------------------------------------------------------------
+# Health / info
+# ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model_version": _model_version,
+    }
 
 
 @app.get("/")
 def root():
     return {
         "service": "NeuralBudget M2 Anomaly Detection Service",
-        "version": "1.0.0",
-        "endpoints": ["/health", "/predict/anomaly"],
+        "version": "2.0.0",
+        "model_version": _model_version,
+        "endpoints": [
+            "/health",
+            "/predict/anomaly",
+            "/feedback",
+            "/metrics",
+            "/metrics/feedback",
+            "/metrics/feedback/since/{model_version}",
+            "/admin/reload",
+        ],
     }
 
 
+# ---------------------------------------------------------------------------
+# Prediction
+# ---------------------------------------------------------------------------
 @app.post("/predict/anomaly", response_model=M2Output)
 def predict_anomaly(x: M2Input):
-    # Build feature vector in exact FEATURE_COLS order from train_m2.py
     features = np.array(
         [[
             x.abs_amount,
@@ -113,12 +333,11 @@ def predict_anomaly(x: M2Input):
         dtype=np.float32,
     )
 
-    outputs = session.run(None, {_input_name: features})
-    # outputs[0]: label array (int64), -1=anomaly, 1=normal
-    # outputs[1]: scores array (float), decision_function values
+    with _model_lock:
+        outputs = _session.run(None, {_input_name: features})
+
     label = int(outputs[0][0])
     raw_score = outputs[1]
-    # scores may be a 1-D array or a list of length 1
     anomaly_score = float(raw_score[0]) if hasattr(raw_score, "__len__") else float(raw_score)
 
     is_ml_anomaly = label == -1
@@ -134,6 +353,11 @@ def predict_anomaly(x: M2Input):
     else:
         badge_type = None
 
+    # Record Prometheus metrics
+    M2_PREDICTIONS.labels(badge_type=badge_type or "none").inc()
+    M2_ANOMALY_SCORE.observe(anomaly_score)
+    _record_prediction(is_anomaly)
+
     return M2Output(
         transaction_id=x.transaction_id,
         synthetic_user_id=x.synthetic_user_id,
@@ -146,5 +370,57 @@ def predict_anomaly(x: M2Input):
             amount_spike=amount_spike,
         ),
         badge_type=badge_type,
-        model_version=MODEL_VERSION,
+        model_version=_model_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+@app.post("/feedback")
+def feedback_endpoint(request: M2FeedbackBatch):
+    logged = log_feedback(request.entries)
+    for entry in request.entries:
+        if entry.feedback_type == "dismiss_false_positive":
+            M2_DISMISSALS.labels(badge_type=entry.badge_type or "unknown").inc()
+        elif entry.feedback_type == "confirmed_anomaly":
+            M2_CONFIRMS.inc()
+
+    stats = get_feedback_stats()
+    M2_DISMISS_RATE.set(stats["dismiss_rate"])
+    return {"logged": logged}
+
+
+# ---------------------------------------------------------------------------
+# Feedback stats (used by retrain daemon)
+# ---------------------------------------------------------------------------
+@app.get("/metrics/feedback")
+def feedback_metrics():
+    return get_feedback_stats()
+
+
+@app.get("/metrics/feedback/since/{model_version}")
+def feedback_metrics_since(model_version: str):
+    return get_feedback_stats(since_version=model_version)
+
+
+# ---------------------------------------------------------------------------
+# Admin — hot-reload model from disk
+# ---------------------------------------------------------------------------
+@app.post("/admin/reload")
+def admin_reload(version: str | None = None):
+    global _model_version
+
+    def _do_reload(pin: str | None):
+        global _model_version
+        if pin:
+            _model_version = f"m2_isolation_forest_v{pin}"
+        _load_model()
+        _update_version_gauge()
+
+    threading.Thread(target=_do_reload, args=(version,), daemon=True).start()
+    return {
+        "status": "reload_started",
+        "pin_version": version,
+        "current_version": _model_version,
+    }
