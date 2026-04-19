@@ -28,6 +28,41 @@ import * as transactionsSlice from './transactions/transactionsSlice';
 import { redo, undo } from './undo';
 import * as usersSlice from './users/usersSlice';
 
+if (!window.Actual) {
+  window.Actual = {
+    IS_DEV: import.meta.env.DEV,
+    ACTUAL_VERSION: import.meta.env.VITE_APP_VERSION || 'dev',
+    openURLInBrowser: url => {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    },
+    openInFileManager: () => {},
+    saveFile: async () => {},
+    openFileDialog: async () => [],
+    relaunch: () => {
+      window.location.reload();
+    },
+    reload: async () => {
+      window.location.reload();
+    },
+    restartElectronServer: () => {},
+    moveBudgetDirectory: async () => {},
+    applyAppUpdate: async () => {},
+    ipcConnect: () => {},
+    getServerSocket: async () => null,
+    setTheme: () => {},
+    logToTerminal: (...args) => {
+      console.log(...args);
+    },
+    onEventFromMain: () => {},
+    isUpdateReadyForDownload: () => false,
+    waitForUpdateReadyForDownload: async () => {},
+    startSyncServer: async () => {},
+    stopSyncServer: async () => {},
+    isSyncServerRunning: async () => false,
+    startOAuthServer: async () => '',
+  };
+}
+
 const queryClient = new QueryClient();
 window.__TANSTACK_QUERY_CLIENT__ = queryClient;
 

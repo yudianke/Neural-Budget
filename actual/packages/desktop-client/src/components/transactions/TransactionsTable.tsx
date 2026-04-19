@@ -1115,26 +1115,28 @@ const Transaction = memo(function Transaction({
 
     // Don't save a temporary value (a new payee) which will be
     // filled in with a real id later
-    if (
+    const isTempPayeeValue =
       name === 'payee' &&
       value &&
-      (value as TransactionEntity['payee'])?.startsWith('new:')
-    ) {
-      setTransaction(newTransaction);
-    } else {
-      const deserialized = deserializeTransaction(
-        newTransaction,
-        originalTransaction,
-      );
-      // Run the transaction through the formatting so that we know
-      // it's always showing the formatted result
-      setTransaction(serializeTransaction(deserialized, showZeroInDeposit));
+      (value as TransactionEntity['payee'])?.startsWith('new:');
 
-      const deserializedName = ['credit', 'debit'].includes(name)
-        ? 'amount'
-        : name;
-      onSave(deserialized, subtransactions, deserializedName);
+    if (isTempPayeeValue && !isTemporaryId(transaction.id)) {
+      setTransaction(newTransaction);
+      return;
     }
+
+    const deserialized = deserializeTransaction(
+      newTransaction,
+      originalTransaction,
+    );
+    // Run the transaction through the formatting so that we know
+    // it's always showing the formatted result
+    setTransaction(serializeTransaction(deserialized, showZeroInDeposit));
+
+    const deserializedName = ['credit', 'debit'].includes(name)
+      ? 'amount'
+      : name;
+    onSave(deserialized, subtransactions, deserializedName);
   };
 
   const {
@@ -1733,7 +1735,14 @@ const Transaction = memo(function Transaction({
                     fontWeight: 300,
                     color: theme.formInputTextHighlight,
                   }
-                : valueStyle
+                : originalTransaction._mlConfidence !== undefined
+                  ? {
+                      // ML auto-filled: subtle blue tint to distinguish from
+                      // user-set or rule-set categories
+                      ...valueStyle,
+                      color: theme.noticeTextMenu,
+                    }
+                  : valueStyle
             }
             onUpdate={async value => {
               if (value === 'split') {
@@ -1769,6 +1778,14 @@ const Transaction = memo(function Transaction({
                   onUpdate={onUpdate}
                   onSelect={onSave}
                   showHiddenCategories={showHiddenCategories}
+                  mlSuggestions={
+                    originalTransaction._mlTop3
+                      ? originalTransaction._mlTop3
+                      : undefined
+                  }
+                  onSelectMlSuggestion={id => {
+                    onSave(id);
+                  }}
                 />
               </SheetNameProvider>
             )}
@@ -2094,6 +2111,15 @@ function NewTransaction({
   useProperFocus(cancelButtonRef, focusedField === 'cancel');
 
   const handleAddClick = (e: { ctrlKey?: boolean; metaKey?: boolean }) => {
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLElement &&
+      activeElement !== addButtonRef.current &&
+      activeElement !== cancelButtonRef.current
+    ) {
+      activeElement.blur();
+    }
+
     if (e.ctrlKey || e.metaKey) {
       onAddAndClose();
     } else {

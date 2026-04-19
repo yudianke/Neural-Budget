@@ -41,7 +41,7 @@ import type {
   TransactionEntity,
 } from '#types/models';
 
-import { predictCategory as predictCategoryFromML } from './ml-service';
+import { predictCategoryWithSuggestions as predictCategoryFromML } from './ml-service';
 
 import { batchUpdateTransactions } from '.';
 
@@ -368,9 +368,15 @@ export async function runRules(
   }
 
   if (!finalTrans.category) {
-    const predictedCategoryId = await predictCategoryFromML(finalTrans);
-    if (predictedCategoryId) {
-      finalTrans.category = predictedCategoryId;
+    const mlResult = await predictCategoryFromML(finalTrans);
+    if (mlResult) {
+      // Attach ML metadata so the client can display confidence badges and
+      // top-3 suggestions regardless of whether the threshold was met.
+      finalTrans._mlConfidence = mlResult.confidence;
+      finalTrans._mlTop3 = mlResult.top3;
+      if (mlResult.categoryId) {
+        finalTrans.category = mlResult.categoryId;
+      }
     }
   }
 
@@ -957,7 +963,9 @@ export async function prepareTransactionForRules(
   accounts: Map<string, db.DbAccount> | null = null,
 ): Promise<TransactionForRules> {
   const r: TransactionForRules = { ...trans };
-  if (trans.payee) {
+  if (typeof trans.payee === 'string' && trans.payee.startsWith('new:')) {
+    r.payee_name = trans.payee.slice('new:'.length).trim();
+  } else if (trans.payee) {
     const payee = await getPayee(trans.payee);
     if (payee) {
       r.payee_name = payee.name;
@@ -1027,7 +1035,11 @@ export async function finalizeTransactionForRules(
   trans: TransactionEntity | TransactionForRules,
 ): Promise<TransactionEntity> {
   if ('payee_name' in trans) {
-    if (trans.payee === 'new') {
+    const isNewPayee =
+      trans.payee === 'new' ||
+      (typeof trans.payee === 'string' && trans.payee.startsWith('new:'));
+
+    if (isNewPayee) {
       if (trans.payee_name) {
         let payeeId = (await getPayeeByName(trans.payee_name))?.id;
         payeeId ??= await insertPayee({

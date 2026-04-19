@@ -13,6 +13,7 @@ const M1_CATEGORIES = [
   'Education',
   'Charity',
   'Personal Care',
+  'Cash Transfers',
   'Misc',
 ];
 
@@ -46,11 +47,17 @@ export default async function runMigration(db) {
       );
       if (existing.length > 0) continue;
 
+      const newId = uuidv4();
       db.runQuery(
         `INSERT INTO categories
            (id, name, is_income, cat_group, sort_order, tombstone, hidden)
          VALUES (?, ?, 0, ?, ?, 0, 0)`,
-        [uuidv4(), name, groupId, sortOrder],
+        [newId, name, groupId, sortOrder],
+      );
+      // category_mapping maps id → canonical id so the AQL v_transactions view resolves correctly
+      db.runQuery(
+        `INSERT OR IGNORE INTO category_mapping (id, transferId) VALUES (?, ?)`,
+        [newId, newId],
       );
       sortOrder += 16384;
     }

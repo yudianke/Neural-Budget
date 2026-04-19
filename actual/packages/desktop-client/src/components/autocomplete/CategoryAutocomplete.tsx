@@ -202,6 +202,12 @@ function customSort(obj: CategoryAutocompleteItem, value: string): number {
   return 0;
 }
 
+type MlSuggestionItem = {
+  category: string;
+  categoryId: string | null;
+  confidence: number;
+};
+
 type CategoryAutocompleteProps = ComponentProps<
   typeof Autocomplete<CategoryAutocompleteItem>
 > & {
@@ -218,6 +224,10 @@ type CategoryAutocompleteProps = ComponentProps<
     props: ComponentPropsWithoutRef<typeof CategoryItem>,
   ) => ReactElement<typeof CategoryItem>;
   showHiddenCategories?: boolean;
+  /** Top-3 ML suggestions to show at the top of the dropdown */
+  mlSuggestions?: MlSuggestionItem[];
+  /** Called when the user selects an ML suggestion */
+  onSelectMlSuggestion?: (categoryId: string) => void;
 };
 
 export function CategoryAutocomplete({
@@ -230,6 +240,8 @@ export function CategoryAutocomplete({
   renderCategoryItemGroupHeader,
   renderCategoryItem,
   showHiddenCategories,
+  mlSuggestions,
+  onSelectMlSuggestion,
   ...props
 }: CategoryAutocompleteProps) {
   const { data: { grouped: defaultCategoryGroups } = { grouped: [] } } =
@@ -299,6 +311,14 @@ export function CategoryAutocomplete({
     [],
   );
 
+  const mlSuggestionsHeader =
+    mlSuggestions && mlSuggestions.length > 0 ? (
+      <MlSuggestionsSection
+        suggestions={mlSuggestions}
+        onSelect={onSelectMlSuggestion}
+      />
+    ) : null;
+
   return (
     <Autocomplete
       strict
@@ -317,20 +337,139 @@ export function CategoryAutocomplete({
       filterSuggestions={filterSuggestions}
       suggestions={categorySuggestions}
       renderItems={(items, getItemProps, highlightedIndex) => (
-        <CategoryList
-          items={items}
-          embedded={embedded}
-          getItemProps={getItemProps}
-          highlightedIndex={highlightedIndex}
-          renderSplitTransactionButton={renderSplitTransactionButton}
-          renderCategoryItemGroupHeader={renderCategoryItemGroupHeader}
-          renderCategoryItem={renderCategoryItem}
-          showHiddenItems={showHiddenCategories}
-          showBalances={showBalances}
-        />
+        <View>
+          {mlSuggestionsHeader}
+          <CategoryList
+            items={items}
+            embedded={embedded}
+            getItemProps={getItemProps}
+            highlightedIndex={highlightedIndex}
+            renderSplitTransactionButton={renderSplitTransactionButton}
+            renderCategoryItemGroupHeader={renderCategoryItemGroupHeader}
+            renderCategoryItem={renderCategoryItem}
+            showHiddenItems={showHiddenCategories}
+            showBalances={showBalances}
+          />
+        </View>
       )}
       {...props}
     />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ML Suggestions Section
+// Renders a compact AI-suggestions header at the top of the category dropdown
+// when the M1 model returned top-3 predictions for the current transaction.
+// ---------------------------------------------------------------------------
+
+type MlSuggestionsSectionProps = {
+  suggestions: MlSuggestionItem[];
+  onSelect?: (categoryId: string) => void;
+};
+
+function MlSuggestionsSection({
+  suggestions,
+  onSelect,
+}: MlSuggestionsSectionProps) {
+  return (
+    <View
+      style={{
+        borderBottom: `1px solid ${theme.pillBorder}`,
+        paddingBottom: 4,
+        marginBottom: 2,
+      }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          padding: '4px 8px 2px',
+          gap: 4,
+        }}
+      >
+        {/* Sparkle icon rendered as SVG inline so we don't need a new asset */}
+        <svg
+          width={11}
+          height={11}
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+          style={{ flexShrink: 0 }}
+        >
+          <path
+            d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5z"
+            fill={theme.noticeTextMenu}
+          />
+        </svg>
+        <Text
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            color: theme.noticeTextMenu,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+          }}
+        >
+          <Trans>AI suggestions</Trans>
+        </Text>
+      </View>
+      {suggestions.map(s => (
+        <button
+          key={s.category}
+          type="button"
+          disabled={!s.categoryId}
+          onMouseDown={e => {
+            // Prevent the input from losing focus before the click registers,
+            // which would close the dropdown before onSelect fires.
+            e.preventDefault();
+          }}
+          onClick={() => s.categoryId && onSelect?.(s.categoryId)}
+          className={css({
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '3px 8px 3px 20px',
+            background: 'transparent',
+            border: 'none',
+            font: 'inherit',
+            cursor: s.categoryId ? 'pointer' : 'default',
+            color: s.categoryId
+              ? theme.menuAutoCompleteItemText
+              : theme.pageTextSubdued,
+            ':hover': {
+              backgroundColor: s.categoryId
+                ? theme.menuAutoCompleteBackgroundHover
+                : 'transparent',
+              color: s.categoryId
+                ? theme.menuAutoCompleteItemTextHover
+                : theme.pageTextSubdued,
+            },
+          })}
+          data-testid={`ml-suggestion-${s.category}`}
+        >
+          <Text style={{ fontSize: 13 }}>
+            {/* Capitalize first letter of each word (category names are snake_case
+                from the model; normalizeCategoryName on the server handles _→space) */}
+            {s.category
+              .replace(/_/g, ' ')
+              .replace(/\b\w/g, c => c.toUpperCase())}
+          </Text>
+          <Text
+            style={{
+              fontSize: 11,
+              color: theme.noticeTextMenu,
+              fontWeight: 500,
+              marginLeft: 8,
+              flexShrink: 0,
+            }}
+          >
+            {Math.round(s.confidence * 100)}%
+          </Text>
+        </button>
+      ))}
+    </View>
   );
 }
 

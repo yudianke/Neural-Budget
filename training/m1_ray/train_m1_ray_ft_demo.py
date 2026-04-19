@@ -55,9 +55,16 @@ def main():
         os.remove(SENTINEL)
 
     if 's3' in config:
-        os.environ['AWS_ACCESS_KEY_ID'] = config['s3']['access_key']
-        os.environ['AWS_SECRET_ACCESS_KEY'] = config['s3']['secret_key']
-        os.environ['AWS_ENDPOINT_URL'] = config['s3']['endpoint_url']
+        s3_cfg = config['s3']
+        access_key = os.environ.get('AWS_ACCESS_KEY_ID') or s3_cfg.get('access_key')
+        secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY') or s3_cfg.get('secret_key')
+        endpoint_url = os.environ.get('AWS_ENDPOINT_URL') or s3_cfg.get('endpoint_url')
+        if access_key:
+            os.environ['AWS_ACCESS_KEY_ID'] = access_key
+        if secret_key:
+            os.environ['AWS_SECRET_ACCESS_KEY'] = secret_key
+        if endpoint_url:
+            os.environ['AWS_ENDPOINT_URL'] = endpoint_url
 
     mlflow.set_tracking_uri(config['mlflow_tracking_uri'])
     mlflow.set_experiment(config["experiment_name"])
