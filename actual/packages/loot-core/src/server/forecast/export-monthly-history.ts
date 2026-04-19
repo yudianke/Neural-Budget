@@ -32,7 +32,13 @@ export async function exportMonthlyCategoryHistory(
 
   const resultMap = new Map<string, MonthlyCategoryHistoryRow>();
 
-  for (const t of transactions) {
+  for (const rawT of transactions) {
+    const t = rawT as {
+      date: string;
+      category_id: string;
+      category_name?: string;
+      amount: number;
+    };
     const date = new Date(t.date);
 
     const year = date.getFullYear();
@@ -48,7 +54,7 @@ export async function exportMonthlyCategoryHistory(
         category_name: t.category_name || 'Unknown',
         year_month: yearMonth,
         monthly_spend: 0,
-        budgeted: 0, // we’ll fill later
+        budgeted: 0, // we'll fill later
       });
     }
 

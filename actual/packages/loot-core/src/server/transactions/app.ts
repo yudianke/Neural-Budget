@@ -39,6 +39,7 @@ export type TransactionHandlers = {
   'get-latest-transaction': typeof getLatestTransaction;
   'forecast-get-category-predictions': typeof getCategoryPredictions;
   'forecast-export-monthly-history': typeof exportForecastMonthlyHistory;
+  'forecast-apply-as-budgets': typeof applyForecastsAsBudgets;
 };
 
 async function exportForecastMonthlyHistory() {
@@ -280,7 +281,7 @@ async function getCategoryPredictions() {
   ];
 
   const categories = await Promise.all(
-    categoryIds.map(id => db.getCategory(id)),
+    categoryIds.map(id => db.getCategory(id as string)),
   );
 
   const categoryMap = new Map(
@@ -494,6 +495,82 @@ async function getCategoryPredictions() {
   };
 }
 
+/**
+ * Apply M3 forecast amounts as next-month budget targets.
+ *
+ * Only writes to categories where the existing next-month budget is 0 (or unset)
+ * — never overwrites a budget the user has already set intentionally.
+ *
+ * @param entries  Array of { categoryName, amount } from the ForecastCard.
+ *                 categoryName is the raw string from the M3 response (may be
+ *                 TitleCase or lowercase_underscore — we normalize it).
+ *                 amount is in dollars (float); we convert to integer cents.
+ * @returns        { applied: number, skipped: number, month: string }
+ */
+async function applyForecastsAsBudgets({
+  entries,
+}: {
+  entries: Array<{ categoryName: string; amount: number }>;
+}): Promise<{ applied: number; skipped: number; month: string }> {
+  const { setBudget } = await import('../budget/actions');
+
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const targetMonth = monthUtils.addMonths(currentMonth, 1);
+  const targetSheetName = monthUtils.sheetForMonth(targetMonth);
+
+  // Load all categories so we can match by name (normalized)
+  const { data: categoryRows } = await aqlQuery(
+    q('categories').select(['id', 'name']),
+  );
+
+  const normalizeCatName = (s: string) =>
+    s.replace(/_/g, ' ').trim().toLowerCase();
+
+  // Build normalized name → id map
+  const nameToId = new Map<string, string>();
+  for (const cat of categoryRows) {
+    nameToId.set(normalizeCatName(cat.name), cat.id);
+  }
+
+  let applied = 0;
+  let skipped = 0;
+
+  for (const entry of entries) {
+    const categoryId = nameToId.get(normalizeCatName(entry.categoryName));
+    if (!categoryId) {
+      skipped++;
+      continue;
+    }
+
+    // Read the current next-month budget for this category
+    const existing = sheet.getCellValue(targetSheetName, `budget-${categoryId}`);
+    const existingAmount = existing === '' ? 0 : Number(existing || 0);
+
+    // Skip if the user already has a non-zero budget set
+    if (existingAmount !== 0) {
+      skipped++;
+      continue;
+    }
+
+    // Convert dollars to integer cents (ActualBudget stores amounts in cents)
+    const amountCents = Math.round(entry.amount * 100);
+    if (amountCents <= 0) {
+      skipped++;
+      continue;
+    }
+
+    await setBudget({
+      category: categoryId,
+      month: targetMonth,
+      amount: amountCents,
+    });
+    applied++;
+  }
+
+  return { applied, skipped, month: targetMonth };
+}
+
 export const app = createApp<TransactionHandlers>();
 
 app.method(
@@ -514,3 +591,4 @@ app.method('get-earliest-transaction', getEarliestTransaction);
 app.method('get-latest-transaction', getLatestTransaction);
 app.method('forecast-get-category-predictions', getCategoryPredictions);
 app.method('forecast-export-monthly-history', exportForecastMonthlyHistory);
+app.method('forecast-apply-as-budgets', mutator(applyForecastsAsBudgets));

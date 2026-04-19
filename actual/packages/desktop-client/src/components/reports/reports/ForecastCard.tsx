@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useEffect, useState} from 'react';
 
 import {Trans, useTranslation} from 'react-i18next';
 
@@ -225,10 +225,13 @@ export function ForecastCard({
   const [data, setData] = useState<ForecastResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<{applied: number; month: string} | null>(null);
 
-  const load = useCallback(async () => {
+  async function load() {
     setLoading(true);
     setError(null);
+    setApplyResult(null);
     try {
       const json = await send('forecast-get-category-predictions');
       setData(json);
@@ -237,49 +240,75 @@ export function ForecastCard({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  useEffect(
+    () => {
+      void load();
+    },
+    // load is a stable local function defined in the same component scope;
+    // we only want to fetch on mount, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // Sort by gap descending (highest over-budget risk first)
-  const topForecasts = useMemo(() => {
-    if (!data?.forecasts) return [];
-    return [...data.forecasts]
-      .sort(
-        (a, b) =>
-          (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) -
-          (a.gap_to_budget ?? Number.NEGATIVE_INFINITY),
-      )
-      .slice(0, 6);
-  }, [data]);
+  const topForecasts = data?.forecasts
+    ? [...data.forecasts]
+        .sort(
+          (a, b) =>
+            (b.gap_to_budget ?? Number.NEGATIVE_INFINITY) -
+            (a.gap_to_budget ?? Number.NEGATIVE_INFINITY),
+        )
+        .slice(0, 6)
+    : [];
 
   // Total forecast across all categories (not just top-6)
-  const totalForecast = useMemo(() => {
-    if (!data?.forecasts) return null;
-    const sum = data.forecasts.reduce((acc, f) => acc + (f.forecast ?? 0), 0);
-    return sum > 0 ? sum : null;
-  }, [data]);
+  const totalForecast = data?.forecasts
+    ? data.forecasts.reduce((acc, f) => acc + (f.forecast ?? 0), 0) || null
+    : null;
 
   // Scale = the max value among forecast + budgeted + last_month across rows
-  // Used to normalize all bars to the same reference width
-  const barScale = useMemo(() => {
-    if (!topForecasts.length) return 1;
-    return Math.max(
-      ...topForecasts.flatMap(f => [
-        f.forecast ?? 0,
-        f.budgeted ?? 0,
-        f.last_month ?? 0,
-      ]),
-      1,
-    );
-  }, [topForecasts]);
+  const barScale = topForecasts.length
+    ? Math.max(
+        ...topForecasts.flatMap(f => [
+          f.forecast ?? 0,
+          f.budgeted ?? 0,
+          f.last_month ?? 0,
+        ]),
+        1,
+      )
+    : 1;
 
-  const nowLabel = useMemo(() => {
-    const d = new Date();
-    return d.toLocaleString('default', {month: 'long', year: 'numeric'});
-  }, []);
+  // True when every visible category has no budget set yet
+  const noBudgetsSet =
+    topForecasts.length > 0 &&
+    topForecasts.every(f => !f.budgeted || f.budgeted === 0);
+
+  const now = new Date();
+  const nowLabel = now.toLocaleString('default', {month: 'long', year: 'numeric'});
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const nextMonthLabel = nextMonthDate.toLocaleString('default', {month: 'long', year: 'numeric'});
+
+  async function handleApplyAsBudgets() {
+    if (!data?.forecasts) return;
+    setApplying(true);
+    setError(null);
+    try {
+      const entries = data.forecasts
+        .filter(f => f.forecast != null && f.forecast > 0)
+        .map(f => ({categoryName: f.category, amount: f.forecast as number}));
+
+      const result = await send('forecast-apply-as-budgets', {entries});
+      setApplyResult({applied: result.applied, month: result.month});
+      // Reload so gap chips reflect the newly written budgets
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApplying(false);
+    }
+  }
 
   return (
     <ReportCard
@@ -349,22 +378,77 @@ export function ForecastCard({
         {/* Body */}
         {error ? (
           <View style={{padding: '0 20px 20px'}}>
-            <Text style={{fontSize: 13, color: theme.reportsRed}}>
-              {error}
-            </Text>
+            <Text style={{fontSize: 13, color: theme.reportsRed}}>{error}</Text>
           </View>
         ) : loading && !data ? (
           <LoadingIndicator />
         ) : data && topForecasts.length > 0 ? (
           <View style={{flex: 1, padding: '0 20px 16px', gap: 12}}>
+            {/* Success confirmation banner */}
+            {applyResult && (
+              <View
+                style={{
+                  backgroundColor: theme.noticeBackground,
+                  borderRadius: 6,
+                  padding: '8px 12px',
+                }}
+              >
+                <Text style={{fontSize: 12, color: theme.noticeText}}>
+                  <Trans>
+                    Set {applyResult.applied} budget{applyResult.applied !== 1 ? 's' : ''} for{' '}
+                    {new Date(applyResult.month + '-02').toLocaleString('default', {
+                      month: 'long',
+                      year: 'numeric',
+                    })}
+                  </Trans>
+                </Text>
+              </View>
+            )}
+
+            {/* "No budgets set" banner with apply button */}
+            {noBudgetsSet && !applyResult && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  backgroundColor: theme.upcomingBackground,
+                  borderRadius: 6,
+                  padding: '8px 12px',
+                  gap: 8,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: theme.upcomingText,
+                    flex: 1,
+                  }}
+                >
+                  <Trans>No budgets set for {nextMonthLabel}</Trans>
+                </Text>
+                <Button
+                  variant="bare"
+                  onPress={() => void handleApplyAsBudgets()}
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: theme.upcomingText,
+                    padding: '3px 8px',
+                    borderRadius: 4,
+                    border: `1px solid ${theme.upcomingBorder}`,
+                    flexShrink: 0,
+                  }}
+                >
+                  {applying
+                    ? <Trans>Applying…</Trans>
+                    : <Trans>Use forecasts as budgets</Trans>}
+                </Button>
+              </View>
+            )}
+
             {/* Legend */}
-            <View
-              style={{
-                flexDirection: 'row',
-                gap: 14,
-                alignItems: 'center',
-              }}
-            >
+            <View style={{flexDirection: 'row', gap: 14, alignItems: 'center'}}>
               <LegendItem color={theme.reportsGreen} label={t('Forecast')} />
               <LegendItem color={theme.reportsBlue} label={t('Budget')} bar />
               <LegendItem color={theme.pageTextSubdued} label={t('Last mo.')} bar thin />
@@ -381,13 +465,7 @@ export function ForecastCard({
             ))}
 
             {/* Footer */}
-            <Text
-              style={{
-                fontSize: 11,
-                color: theme.pageTextSubdued,
-                marginTop: 4,
-              }}
-            >
+            <Text style={{fontSize: 11, color: theme.pageTextSubdued, marginTop: 4}}>
               {data.model_name}
             </Text>
           </View>
