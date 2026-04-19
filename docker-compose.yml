@@ -138,6 +138,7 @@ services:
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
       MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
       AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      GIT_PYTHON_REFRESH: "quiet"
     volumes:
       - m2_feedback_data:/data/feedback
     networks:
