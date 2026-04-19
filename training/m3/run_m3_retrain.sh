@@ -12,15 +12,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT_DIR="$REPO_ROOT/training/m3"
 M3_SERVING_URL="${M3_SERVING_URL:-http://localhost:8002}"
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-0fc136376b7c47528dfd06a09d12ccbd}"
+AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-b52fcbb61618453aacc6ababb530031c}"
+MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-https://chi.tacc.chameleoncloud.org:7480}"
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY MLFLOW_S3_ENDPOINT_URL
 
 echo "[M3-retrain] $(date) Starting monthly retrain"
+echo "[M3-retrain] Data source: s3://neural-budget-data-proj16/processed/batch_datasets"
 
-# Step 1: Regenerate batch datasets with latest data
-echo "[M3-retrain] Running batch pipeline..."
-cd "$REPO_ROOT"
-python3 data_pipeline/batch_pipeline.py
-
-# Step 2: Train new model with quality gate + MLflow registration
+# Step 1: Train new model — reads forecasting_train.csv directly from S3
+# (batch_pipeline.py uploads to S3 after each run; training reads from there)
 echo "[M3-retrain] Training M3 forecast model..."
 MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
   python3 "$SCRIPT_DIR/train_m3.py"

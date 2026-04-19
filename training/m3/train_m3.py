@@ -5,19 +5,31 @@ Usage:
     python train_m3.py
 
 Environment variables:
-    MLFLOW_TRACKING_URI   MLflow server URL (default: http://129.114.27.211:8000)
-    M3_GATE_MAE           MAE threshold for absolute quality gate (default: 150.0)
+    MLFLOW_TRACKING_URI       MLflow server URL (default: http://129.114.27.211:8000)
+    M3_GATE_MAE               MAE threshold for absolute quality gate (default: 150.0)
+    M3_DATA_BUCKET            S3 bucket for training data (default: neural-budget-data-proj16)
+    M3_DATA_PREFIX            S3 prefix for forecasting CSVs (default: processed/batch_datasets)
+    AWS_ACCESS_KEY_ID         Chameleon object storage key
+    AWS_SECRET_ACCESS_KEY     Chameleon object storage secret
+    MLFLOW_S3_ENDPOINT_URL    S3 endpoint (default: https://chi.tacc.chameleoncloud.org:7480)
+
+Data source priority:
+    1. S3 bucket (if AWS credentials are set)
+    2. Local filesystem (fallback for development)
 
 Outputs:
     - MLflow run with metrics, params, artifacts
     - Registers new model version in MLflow registry (m3-forecast) if quality gate passes
     - No local file artifacts — serving loads from MLflow
 """
+import io
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 
+import boto3
 import joblib
 import mlflow
 import numpy as np
@@ -27,21 +39,63 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 
 # ---------------------------------------------------------------------------
-# Paths
+# Config
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
-DATA_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_train.csv"
-EVAL_PATH = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_eval.csv"
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
 MODEL_NAME       = "m3-forecast"
 EXPERIMENT_NAME  = "m3-forecast"
 MAE_GATE         = float(os.environ.get("M3_GATE_MAE", "150.0"))
+S3_BUCKET        = os.environ.get("M3_DATA_BUCKET", "neural-budget-data-proj16")
+S3_PREFIX        = os.environ.get("M3_DATA_PREFIX", "processed/batch_datasets")
+S3_ENDPOINT      = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "https://chi.tacc.chameleoncloud.org:7480")
+
+# Local fallback paths (used when AWS credentials are not set)
+LOCAL_DATA_PATH  = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_train.csv"
+LOCAL_EVAL_PATH  = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_eval.csv"
+
+
+# ---------------------------------------------------------------------------
+# Data loading — S3 first, local fallback
+# ---------------------------------------------------------------------------
+def _s3_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+    )
+
+
+def _load_csv_from_s3(key: str) -> pd.DataFrame:
+    s3 = _s3_client()
+    print(f"  Downloading s3://{S3_BUCKET}/{key} ...")
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+    return pd.read_csv(io.BytesIO(obj["Body"].read()))
+
+
+def load_data_csv(filename: str, local_path: Path) -> pd.DataFrame:
+    """Load CSV from S3 if credentials available, else local filesystem."""
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+    if aws_key:
+        try:
+            key = f"{S3_PREFIX}/{filename}"
+            df = _load_csv_from_s3(key)
+            print(f"  Loaded {filename} from S3 ({len(df):,} rows)")
+            return df
+        except Exception as e:
+            print(f"  S3 load failed ({e}), falling back to local...")
+
+    if not local_path.exists():
+        raise FileNotFoundError(
+            f"No data found. Set AWS_ACCESS_KEY_ID to load from S3, "
+            f"or ensure {local_path} exists."
+        )
+    df = pd.read_csv(local_path)
+    print(f"  Loaded {filename} from local ({len(df):,} rows)")
+    return df
 
 # Features that cannot be computed from real ActualBudget data at inference time.
 # Drop them so the served model only uses features the inference service can provide.
@@ -56,8 +110,8 @@ DROP_AT_TRAIN = [
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-def load_data(path: Path):
-    df = pd.read_csv(path)
+def load_data(filename: str, local_path: Path):
+    df = load_data_csv(filename, local_path)
     df["month"] = pd.to_datetime(df["year_month"]).dt.month
     df["year"] = pd.to_datetime(df["year_month"]).dt.year
 
@@ -108,9 +162,12 @@ def main():
     mlflow.set_experiment(EXPERIMENT_NAME)
     client = MlflowClient(tracking_uri=MLFLOW_URI)
 
-    print(f"Loading training data from {DATA_PATH}")
-    X_train, y_train, train_df = load_data(DATA_PATH)
-    X_eval, y_eval, eval_df = load_data(EVAL_PATH)
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+    data_source = f"s3://{S3_BUCKET}/{S3_PREFIX}" if aws_key else str(LOCAL_DATA_PATH.parent)
+    print(f"Loading training data from: {data_source}")
+
+    X_train, y_train, train_df = load_data("forecasting_train.csv", LOCAL_DATA_PATH)
+    X_eval, y_eval, eval_df   = load_data("forecasting_eval.csv",  LOCAL_EVAL_PATH)
 
     # Consistent one-hot encoding across train/eval
     X_train = pd.get_dummies(X_train, dummy_na=True)
@@ -146,6 +203,7 @@ def main():
         mlflow.log_param("eval_rows", len(eval_df))
         mlflow.log_param("mae_gate", MAE_GATE)
         mlflow.log_param("dropped_at_train", ",".join(DROP_AT_TRAIN))
+        mlflow.log_param("data_source", data_source)
 
         mlflow.log_metric("overall_mae", overall_mae)
         mlflow.log_metric("median_per_category_mae", median_per_cat_mae)
