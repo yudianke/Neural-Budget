@@ -117,8 +117,8 @@ services:
   # --------------------------------------------------------------------------
   m3-monitor-daemon:
     build:
-      context: ./training
-      dockerfile: m3/Dockerfile.daemon
+      context: .
+      dockerfile: training/m3/Dockerfile.daemon
     image: m3-monitor-daemon:latest
     container_name: m3-monitor-daemon
     environment:
