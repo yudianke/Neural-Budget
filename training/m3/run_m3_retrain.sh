@@ -23,7 +23,7 @@ python3 data_pipeline/batch_pipeline.py
 # Step 2: Train new model with quality gate + MLflow registration
 echo "[M3-retrain] Training M3 forecast model..."
 MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
-  python3 "$SCRIPT_DIR/train_m3_v2.py"
+  python3 "$SCRIPT_DIR/train_m3.py"
 
 # Step 3: If new version registered, reload the inference service
 echo "[M3-retrain] Checking for new version and reloading serving..."
