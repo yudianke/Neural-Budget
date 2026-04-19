@@ -6,26 +6,30 @@ Loads the latest registered m3-forecast bundle from MLflow at startup
 ActualBudget backend worker to call.
 
 Environment variables:
-    MLFLOW_TRACKING_URI     MLflow server URL
-    M3_REGISTERED_MODEL     MLflow model name (default: m3-forecast)
-    M3_MODEL_VERSION        Pin a specific version (optional, default: latest)
+    MLFLOW_TRACKING_URI         MLflow server URL
+    M3_REGISTERED_MODEL         MLflow model name (default: m3-forecast)
+    M3_MODEL_VERSION            Pin a specific version (optional, default: latest)
+    M3_FORECAST_LOG_PATH        Path to forecast JSONL log (default: /data/m3_feedback/m3_forecasts.jsonl)
+    M3_ACTUALS_URL              URL of ActualBudget export endpoint for forecast-accuracy (optional)
 
 Endpoints:
-    GET  /health                    Service health + loaded model version
-    POST /forecast/features         Real-time forecast from feature rows
-    GET  /metrics                   Prometheus metrics
+    GET  /health                         Service health + loaded model version
+    POST /forecast/features              Real-time forecast from feature rows
+    GET  /metrics                        Prometheus metrics
+    GET  /metrics/forecast-accuracy      Per-category MAE vs actuals for a model version
 """
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import joblib
 import mlflow
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI
+import requests as http_requests
+from fastapi import FastAPI, Query
 from mlflow.tracking import MlflowClient
 from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -33,6 +37,8 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+from forecast_log import log_forecasts, compute_mae_vs_actuals
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("m3_service")
@@ -43,6 +49,9 @@ logger = logging.getLogger("m3_service")
 MLFLOW_URI   = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
 MODEL_NAME   = os.environ.get("M3_REGISTERED_MODEL", "m3-forecast")
 MODEL_VER    = os.environ.get("M3_MODEL_VERSION")   # None = latest
+# URL to the ActualBudget monthly-history export (called by /metrics/forecast-accuracy).
+# When set, the endpoint fetches real actuals from ActualBudget to compute in-production MAE.
+ACTUALS_URL  = os.environ.get("M3_ACTUALS_URL", "")
 
 # ---------------------------------------------------------------------------
 # Model globals (populated by load())
@@ -139,6 +148,8 @@ class ForecastFeatureRow(BaseModel):
     lag_1: float = 0.0
     lag_2: float = 0.0
     lag_3: float = 0.0
+    lag_4: float = 0.0
+    lag_5: float = 0.0
     lag_6: float = 0.0
     rolling_mean_3: float = 0.0
     rolling_std_3: float = 0.0
@@ -252,6 +263,27 @@ def forecast_from_features(request: ForecastFeaturesRequest):
 
     M3_PREDICTIONS.labels(n_categories=str(len(forecasts))).inc()
     logger.info("Forecast for %d categories (model v%s)", len(forecasts), _model_version)
+
+    # Derive the forecast_month from the first row's year/month_num fields (best effort).
+    # Logged asynchronously so it never blocks the response.
+    try:
+        first_row = request.rows[0] if request.rows else None
+        if first_row is not None:
+            year = int(first_row.year)
+            month = int(first_row.month_num)
+            forecast_month = f"{year:04d}-{month:02d}"
+            threading.Thread(
+                target=log_forecasts,
+                kwargs={
+                    "forecast_month": forecast_month,
+                    "category_forecasts": [(f.category, f.forecast or 0.0) for f in forecasts],
+                    "model_version": _model_version,
+                },
+                daemon=True,
+            ).start()
+    except Exception as log_exc:
+        logger.warning("Forecast log error (non-fatal): %s", log_exc)
+
     return ForecastFeaturesResponse(forecasts=forecasts, model_name=_model_name)
 
 
@@ -264,3 +296,56 @@ def admin_reload(version: str | None = None):
         del os.environ["M3_MODEL_VERSION"]
     threading.Thread(target=reload, daemon=True).start()
     return {"status": "reload_started", "current_version": _model_version, "pin_version": version}
+
+
+@app.get("/metrics/forecast-accuracy")
+def forecast_accuracy(
+    version: str = Query(default=None, description="Model version to evaluate (default: current loaded version)"),
+    actuals_url: str = Query(default=None, description="Override URL for fetching actuals (JSON: {month: {category: spend}})"),
+):
+    """Compute per-category MAE for a model version vs real actuals.
+
+    Actuals are fetched from M3_ACTUALS_URL (env) or the actuals_url query param.
+    The URL must return JSON in the shape:
+        { "YYYY-MM": { "category_name": spend_float, ... }, ... }
+
+    If no actuals URL is configured, returns the logged forecast records only
+    (no MAE computed) — useful for the monitor daemon to verify forecasts are
+    being recorded.
+    """
+    target_version = version or _model_version
+    if target_version is None:
+        return {"error": "no model version available", "mae_by_category": {}, "record_count": 0}
+
+    from forecast_log import read_forecasts_for_version
+    records = read_forecasts_for_version(target_version)
+    record_count = len(records)
+
+    # Try to fetch actuals
+    url = actuals_url or ACTUALS_URL
+    actuals: Dict[str, Dict[str, float]] = {}
+    actuals_error = None
+    if url:
+        try:
+            resp = http_requests.get(url, timeout=10)
+            resp.raise_for_status()
+            actuals = resp.json()
+        except Exception as exc:
+            actuals_error = str(exc)
+            logger.warning("Could not fetch actuals from %s: %s", url, exc)
+
+    mae_by_category: Dict[str, float] = {}
+    if actuals:
+        mae_by_category = compute_mae_vs_actuals(target_version, actuals)
+
+    return {
+        "model_version": target_version,
+        "record_count": record_count,
+        "categories_with_mae": len(mae_by_category),
+        "mae_by_category": mae_by_category,
+        "overall_mae": (
+            float(np.mean(list(mae_by_category.values()))) if mae_by_category else None
+        ),
+        "actuals_source": url or None,
+        "actuals_error": actuals_error,
+    }

@@ -7,6 +7,7 @@ Usage:
 Environment variables:
     MLFLOW_TRACKING_URI       MLflow server URL (default: http://129.114.27.211:8000)
     M3_GATE_MAE               MAE threshold for absolute quality gate (default: 150.0)
+    M3_CATEGORY_REGRESSION_MAX  Max allowed per-category MAE regression vs prev version (default: 0.30)
     M3_DATA_BUCKET            S3 bucket for training data (default: neural-budget-data-proj16)
     M3_DATA_PREFIX            S3 prefix for forecasting CSVs (default: processed/batch_datasets)
     AWS_ACCESS_KEY_ID         Chameleon object storage key
@@ -22,8 +23,10 @@ Outputs:
     - Registers new model version in MLflow registry (m3-forecast) if quality gate passes
     - No local file artifacts — serving loads from MLflow
 """
+import hashlib
 import io
 import os
+import subprocess
 import sys
 import time
 import tempfile
@@ -48,6 +51,7 @@ MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:
 MODEL_NAME       = "m3-forecast"
 EXPERIMENT_NAME  = "m3-forecast"
 MAE_GATE         = float(os.environ.get("M3_GATE_MAE", "150.0"))
+CATEGORY_REGRESSION_MAX = float(os.environ.get("M3_CATEGORY_REGRESSION_MAX", "0.30"))
 S3_BUCKET        = os.environ.get("M3_DATA_BUCKET", "neural-budget-data-proj16")
 S3_PREFIX        = os.environ.get("M3_DATA_PREFIX", "processed/batch_datasets")
 S3_ENDPOINT      = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "https://chi.tacc.chameleoncloud.org:7480")
@@ -109,6 +113,11 @@ DROP_AT_TRAIN = [
     "user_total_lag_1",
     "user_total_rolling_mean_3",
     "category_share_lag_1",
+    # Budget field — not available in synthetic training data and always 0 in the
+    # inference service's ForecastFeatureRow schema (ActualBudget budget targets
+    # are read separately in app.ts and compared post-inference, not fed into the
+    # model). Including it in training on zeroed values causes systematic bias.
+    "budgeted",
 ]
 
 
@@ -158,6 +167,8 @@ def _build_supervised_rows(monthly_df: pd.DataFrame, min_history: int = 3) -> pd
                 "lag_1":  prior[-1] if len(prior) >= 1 else 0,
                 "lag_2":  prior[-2] if len(prior) >= 2 else 0,
                 "lag_3":  prior[-3] if len(prior) >= 3 else 0,
+                "lag_4":  prior[-4] if len(prior) >= 4 else 0,
+                "lag_5":  prior[-5] if len(prior) >= 5 else 0,
                 "lag_6":  prior[-6] if len(prior) >= 6 else 0,
                 "rolling_mean_3": float(np.mean(prior3)),
                 "rolling_std_3":  float(np.std(prior3, ddof=1))  if len(prior3) > 1 else 0.0,
@@ -223,6 +234,74 @@ def get_previous_mae(client: MlflowClient) -> float | None:
         return None
 
 
+def get_previous_per_category_mae(client: MlflowClient) -> dict[str, float]:
+    """Return per-category MAE metrics from the latest registered version.
+
+    Metric keys are stored as mae_<category> (spaces/slashes replaced with _).
+    Returns empty dict if no previous version exists or metrics not found.
+    """
+    try:
+        versions = client.search_model_versions(f"name='{MODEL_NAME}'")
+        if not versions:
+            return {}
+        latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+        run = client.get_run(latest.run_id)
+        result = {}
+        for key, val in run.data.metrics.items():
+            if key.startswith("mae_"):
+                cat = key[4:]  # strip "mae_" prefix
+                result[cat] = val
+        return result
+    except Exception as e:
+        print(f"[WARN] could not fetch previous per-category MAE: {e}")
+        return {}
+
+
+def check_category_regression(
+    per_cat_df: pd.DataFrame,
+    prev_per_cat: dict[str, float],
+    max_regression: float = CATEGORY_REGRESSION_MAX,
+) -> tuple[bool, list[str]]:
+    """Check that no category's MAE regressed by more than max_regression (relative).
+
+    Returns (gate_passed, list_of_regressed_categories).
+    """
+    regressed = []
+    for _, row in per_cat_df.iterrows():
+        cat_key = row["project_category"].replace(" ", "_").replace("/", "_")
+        new_mae = float(row["mae"])
+        old_mae = prev_per_cat.get(cat_key)
+        if old_mae is None or old_mae == 0.0:
+            continue  # no baseline, skip
+        relative_change = (new_mae - old_mae) / old_mae
+        if relative_change > max_regression:
+            regressed.append(
+                f"{cat_key}: {old_mae:.2f} → {new_mae:.2f} "
+                f"(+{relative_change * 100:.1f}%)"
+            )
+    return len(regressed) == 0, regressed
+
+
+def _compute_data_hash(df_train: pd.DataFrame, df_eval: pd.DataFrame) -> str:
+    """MD5 hash of combined train+eval data for reproducibility tracking."""
+    combined_bytes = (
+        df_train.to_csv(index=False) + df_eval.to_csv(index=False)
+    ).encode("utf-8")
+    return hashlib.md5(combined_bytes).hexdigest()
+
+
+def _get_git_commit() -> str:
+    """Return short git commit hash, or 'unknown' if git unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -235,9 +314,15 @@ def main():
     data_source = f"s3://{S3_BUCKET}/{S3_PREFIX}" if aws_key else str(LOCAL_DATA_PATH.parent)
     print(f"Loading training data from: {data_source}")
 
+    git_commit = _get_git_commit()
+    print(f"Git commit: {git_commit}")
+
     # Load raw monthly files
     train_raw = load_data_csv("forecasting_train.csv", LOCAL_DATA_PATH)
     eval_raw  = load_data_csv("forecasting_eval.csv",  LOCAL_EVAL_PATH)
+
+    data_hash = _compute_data_hash(train_raw, eval_raw)
+    print(f"Data hash (MD5): {data_hash}")
 
     # If simple monthly format: build supervised rows from combined data,
     # then re-split by month so eval rows have access to train-period lag history
@@ -279,6 +364,9 @@ def main():
     feature_columns = list(X_train.columns)
     print(f"Training with {len(feature_columns)} features, {len(train_df)} rows")
 
+    # Fetch previous per-category MAE before starting the run (used for regression gate)
+    prev_per_cat_mae = get_previous_per_category_mae(client)
+
     with mlflow.start_run() as run:
         start = time.time()
 
@@ -304,6 +392,7 @@ def main():
         mlflow.log_param("train_rows", len(train_df))
         mlflow.log_param("eval_rows", len(eval_df))
         mlflow.log_param("mae_gate", MAE_GATE)
+        mlflow.log_param("category_regression_max", CATEGORY_REGRESSION_MAX)
         mlflow.log_param("dropped_at_train", ",".join(DROP_AT_TRAIN))
         mlflow.log_param("data_source", data_source)
 
@@ -314,6 +403,10 @@ def main():
         for _, row in per_cat.iterrows():
             name = row["project_category"].replace(" ", "_").replace("/", "_")
             mlflow.log_metric(f"mae_{name}", float(row["mae"]))
+
+        # Accountability + reproducibility tags
+        mlflow.set_tag("git_commit", git_commit)
+        mlflow.set_tag("data_hash_md5", data_hash)
 
         # Log bundle as MLflow artifact (serving loads from here, not local disk)
         import tempfile
@@ -332,11 +425,13 @@ def main():
         print(f"MAE gate threshold:    {MAE_GATE:.4f}")
 
         # ----------------------------------------------------------------
-        # Quality gate — absolute MAE floor
+        # Gate 1 — absolute MAE floor
         # ----------------------------------------------------------------
         absolute_gate_passed = overall_mae <= MAE_GATE
 
-        # Improvement gate — must beat previous registered version
+        # ----------------------------------------------------------------
+        # Gate 2 — improvement over previous registered version (overall)
+        # ----------------------------------------------------------------
         prev_mae = get_previous_mae(client)
         if prev_mae is None:
             improvement_gate_passed = True
@@ -348,10 +443,29 @@ def main():
             improvement_gate_passed = False
             register_reason = f"no improvement (prev={prev_mae:.4f}, curr={overall_mae:.4f})"
 
-        do_register = absolute_gate_passed and improvement_gate_passed
+        # ----------------------------------------------------------------
+        # Gate 3 — per-category regression check
+        # No single category may regress by more than CATEGORY_REGRESSION_MAX
+        # relative to the previous registered version.
+        # ----------------------------------------------------------------
+        if prev_per_cat_mae:
+            cat_gate_passed, regressed_cats = check_category_regression(
+                per_cat, prev_per_cat_mae, CATEGORY_REGRESSION_MAX
+            )
+        else:
+            cat_gate_passed = True  # no baseline, skip
+            regressed_cats = []
+
+        if regressed_cats:
+            print(f"[WARN] Per-category regression detected in {len(regressed_cats)} categories:")
+            for r in regressed_cats:
+                print(f"  {r}")
 
         mlflow.set_tag("absolute_gate_passed", str(absolute_gate_passed).lower())
         mlflow.set_tag("improvement_gate_passed", str(improvement_gate_passed).lower())
+        mlflow.set_tag("category_regression_gate_passed", str(cat_gate_passed).lower())
+        mlflow.set_tag("regressed_categories", "; ".join(regressed_cats) if regressed_cats else "none")
+        do_register = absolute_gate_passed and improvement_gate_passed and cat_gate_passed
         mlflow.set_tag("registered", str(do_register).lower())
         mlflow.set_tag("register_reason", register_reason)
         mlflow.set_tag("previous_mae", str(prev_mae))
@@ -362,6 +476,13 @@ def main():
 
         if not improvement_gate_passed:
             print(f"GATE FAILED: {register_reason} — not registering")
+            sys.exit(0)
+
+        if not cat_gate_passed:
+            print(
+                f"GATE FAILED: {len(regressed_cats)} category(ies) regressed "
+                f">{CATEGORY_REGRESSION_MAX * 100:.0f}% vs previous version — not registering"
+            )
             sys.exit(0)
 
         # ----------------------------------------------------------------

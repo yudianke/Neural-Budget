@@ -9,6 +9,8 @@
 
 volumes:
   feedback_data:
+  m3_feedback_data:
+  m3_state_data:
   prometheus_data:
   grafana_data:
 
@@ -93,10 +95,13 @@ services:
     environment:
       MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
       M3_REGISTERED_MODEL: "m3-forecast"
+      M3_FORECAST_LOG_PATH: "/data/m3_feedback/m3_forecasts.jsonl"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
       MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
       AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    volumes:
+      - m3_feedback_data:/data/m3_feedback
     networks:
       - ml-net
     restart: unless-stopped
@@ -106,6 +111,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # --------------------------------------------------------------------------
+  # M3 Monitor Daemon (monthly retrain trigger + accuracy-based rollback)
+  # --------------------------------------------------------------------------
+  m3-monitor-daemon:
+    build:
+      context: .
+      dockerfile: training/m3/Dockerfile.daemon
+    image: m3-monitor-daemon:latest
+    container_name: m3-monitor-daemon
+    environment:
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
+      M3_SERVING_URL: "http://m3-serving:8002"
+      M3_STATE_PATH: "/data/m3_state/monitor_state.json"
+      M3_RETRAIN_SCRIPT: "/app/training/m3/run_m3_retrain.sh"
+      M3_STATE_DIR: "/data/m3_state"
+      M3_FORECAST_LOG_PATH: "/data/m3_feedback/m3_forecasts.jsonl"
+      M3_ROLLBACK_MAE_DELTA: "1.20"
+      CHECK_INTERVAL_SECONDS: "${CHECK_INTERVAL_SECONDS:-3600}"
+      M3_FORCE_RETRAIN: "${M3_FORCE_RETRAIN:-}"
+      M3_FORCE_EVAL: "${M3_FORCE_EVAL:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
+    volumes:
+      - m3_state_data:/data/m3_state
+      - m3_feedback_data:/data/m3_feedback
+    networks:
+      - ml-net
+    depends_on:
+      m3-serving:
+        condition: service_healthy
+    restart: unless-stopped
   # Prometheus
   # --------------------------------------------------------------------------
   prometheus:

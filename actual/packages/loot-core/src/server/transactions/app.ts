@@ -39,6 +39,7 @@ export type TransactionHandlers = {
   'get-latest-transaction': typeof getLatestTransaction;
   'forecast-get-category-predictions': typeof getCategoryPredictions;
   'forecast-export-monthly-history': typeof exportForecastMonthlyHistory;
+  'forecast-apply-as-budgets': typeof applyForecastsAsBudgets;
 };
 
 async function exportForecastMonthlyHistory() {
@@ -203,6 +204,8 @@ type ForecastFeatureRow = {
   lag_1: number;
   lag_2: number;
   lag_3: number;
+  lag_4: number;
+  lag_5: number;
   lag_6: number;
   rolling_mean_3: number;
   rolling_std_3: number;
@@ -239,23 +242,26 @@ async function getCategoryPredictions() {
     now.getMonth() + 1,
   ).padStart(2, '0')}`;
 
+  // M3 forecasts NEXT month's spend, so budget targets should be read from
+  // next month's sheet — not the current month's sheet.
+  const nextMonth = monthUtils.addMonths(currentMonth, 1);
+
   const {data: categoryRows} = await aqlQuery(
     q('categories').select(['id', 'name']),
   );
 
-  const sheetName = monthUtils.sheetForMonth(currentMonth);
+  const nextMonthSheetName = monthUtils.sheetForMonth(nextMonth);
 
-  function value(name: string) {
-    const v = sheet.get().getCellValue(sheetName, name);
-    return v === '' ? 0 : v;
-  }
-
-
+  // Build budgetMap keyed by category id → next-month budgeted amount (cents).
+  // Only reads the next-month sheet — no fallback to current month.
+  // This ensures gap_to_budget is null (and the "Use forecasts as budgets" banner
+  // is shown) when the user hasn't budgeted next month yet, rather than silently
+  // borrowing the current month's budget and hiding the actionable banner.
   const budgetMap = new Map<string, number>();
 
   for (const cat of categoryRows) {
-    const value = sheet.get().getCellValue(sheetName, `budget-${cat.id}`);
-    budgetMap.set(cat.id, value === '' ? 0 : Number(value || 0));
+    const nextVal = sheet.getCellValue(nextMonthSheetName, `budget-${cat.id}`);
+    budgetMap.set(cat.id, nextVal === '' ? 0 : Number(nextVal || 0));
   }
   if (!data || data.length === 0) {
     return {forecasts: [], model_name: 'm3-forecast'};
@@ -270,7 +276,7 @@ async function getCategoryPredictions() {
   ];
 
   const categories = await Promise.all(
-    categoryIds.map(id => db.getCategory(id)),
+    categoryIds.map(id => db.getCategory(id as string)),
   );
 
   const categoryMap = new Map(
@@ -377,6 +383,8 @@ async function getCategoryPredictions() {
     //   lag_1         = prior[-1]  → lag(0) = history[-1]  (same as monthly_spend)
     //   lag_2         = prior[-2]  → lag(1) = history[-2]
     //   lag_3         = prior[-3]  → lag(2) = history[-3]
+    //   lag_4         = prior[-4]  → lag(3) = history[-4]
+    //   lag_5         = prior[-5]  → lag(4) = history[-5]
     //   lag_6         = prior[-6]  → lag(5) = history[-6]
     featureRows.push({
       project_category,
@@ -384,6 +392,8 @@ async function getCategoryPredictions() {
       lag_1: lag(0),
       lag_2: lag(1),
       lag_3: lag(2),
+      lag_4: lag(3),
+      lag_5: lag(4),
       lag_6: lag(5),
       rolling_mean_3: mean(prior3),
       rolling_std_3: std(prior3),
@@ -424,15 +434,28 @@ async function getCategoryPredictions() {
     return {forecasts: [], model_name: 'm3-forecast'};
   }
 
+  // Normalize category names for case-insensitive, underscore-tolerant matching.
+  // M3 training data uses lowercase underscore names ("personal_care"),
+  // ActualBudget DB uses TitleCase space names ("Personal Care").
+  // M1 has a full CATEGORY_ALIASES map; M3 at minimum needs this normalization.
+  const normalizeCatName = (s: string) =>
+    s.replace(/_/g, ' ').trim().toLowerCase();
+
+  // Pre-build a normalized lookup: normalizedName → categoryId
+  const normalizedCategoryMap = new Map<string, string>();
+  for (const [id, name] of categoryMap.entries()) {
+    normalizedCategoryMap.set(normalizeCatName(name), id);
+  }
+
   const enrichedForecasts = result.forecasts.map(
     (forecast: { category: string; forecast: number | null }) => {
+      const normalizedForecastCat = normalizeCatName(forecast.category);
+
       const match = featureRows.find(
-        row => row.project_category === forecast.category,
+        row => normalizeCatName(row.project_category) === normalizedForecastCat,
       );
 
-      const categoryId = [...categoryMap.entries()].find(
-        ([, name]) => name === forecast.category,
-      )?.[0];
+      const categoryId = normalizedCategoryMap.get(normalizedForecastCat);
 
       const budgeted =
         categoryId && budgetMap.has(categoryId)
@@ -440,7 +463,9 @@ async function getCategoryPredictions() {
           : 0;
 
       const gap_to_budget =
-        forecast.forecast != null ? forecast.forecast - budgeted : null;
+        forecast.forecast != null && budgeted > 0
+          ? forecast.forecast - budgeted
+          : null;
 
       return {
         ...forecast,
@@ -465,6 +490,82 @@ async function getCategoryPredictions() {
   };
 }
 
+/**
+ * Apply M3 forecast amounts as next-month budget targets.
+ *
+ * Only writes to categories where the existing next-month budget is 0 (or unset)
+ * — never overwrites a budget the user has already set intentionally.
+ *
+ * @param entries  Array of { categoryName, amount } from the ForecastCard.
+ *                 categoryName is the raw string from the M3 response (may be
+ *                 TitleCase or lowercase_underscore — we normalize it).
+ *                 amount is in dollars (float); we convert to integer cents.
+ * @returns        { applied: number, skipped: number, month: string }
+ */
+async function applyForecastsAsBudgets({
+  entries,
+}: {
+  entries: Array<{ categoryName: string; amount: number }>;
+}): Promise<{ applied: number; skipped: number; month: string }> {
+  const { setBudget } = await import('../budget/actions');
+
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const targetMonth = monthUtils.addMonths(currentMonth, 1);
+  const targetSheetName = monthUtils.sheetForMonth(targetMonth);
+
+  // Load all categories so we can match by name (normalized)
+  const { data: categoryRows } = await aqlQuery(
+    q('categories').select(['id', 'name']),
+  );
+
+  const normalizeCatName = (s: string) =>
+    s.replace(/_/g, ' ').trim().toLowerCase();
+
+  // Build normalized name → id map
+  const nameToId = new Map<string, string>();
+  for (const cat of categoryRows) {
+    nameToId.set(normalizeCatName(cat.name), cat.id);
+  }
+
+  let applied = 0;
+  let skipped = 0;
+
+  for (const entry of entries) {
+    const categoryId = nameToId.get(normalizeCatName(entry.categoryName));
+    if (!categoryId) {
+      skipped++;
+      continue;
+    }
+
+    // Read the current next-month budget for this category
+    const existing = sheet.getCellValue(targetSheetName, `budget-${categoryId}`);
+    const existingAmount = existing === '' ? 0 : Number(existing || 0);
+
+    // Skip if the user already has a non-zero budget set
+    if (existingAmount !== 0) {
+      skipped++;
+      continue;
+    }
+
+    // Convert dollars to integer cents (ActualBudget stores amounts in cents)
+    const amountCents = Math.round(entry.amount * 100);
+    if (amountCents <= 0) {
+      skipped++;
+      continue;
+    }
+
+    await setBudget({
+      category: categoryId,
+      month: targetMonth,
+      amount: amountCents,
+    });
+    applied++;
+  }
+
+  return { applied, skipped, month: targetMonth };
+}
+
 export const app = createApp<TransactionHandlers>();
 
 app.method(
@@ -485,3 +586,4 @@ app.method('get-earliest-transaction', getEarliestTransaction);
 app.method('get-latest-transaction', getLatestTransaction);
 app.method('forecast-get-category-predictions', getCategoryPredictions);
 app.method('forecast-export-monthly-history', exportForecastMonthlyHistory);
+app.method('forecast-apply-as-budgets', mutator(applyForecastsAsBudgets));
