@@ -183,6 +183,8 @@ class RuleFlags(BaseModel):
 
 
 class M2Output(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     transaction_id: str
     synthetic_user_id: str
     anomaly_score: float

@@ -221,9 +221,25 @@ export async function batchUpdateTransactions({
       if (u.anomaly_dismissed === 1) {
         const full = allUpdated.find(t => t.id === u.id);
         if (full) {
+          // Derive badge_type from stored anomaly_flags JSON
+          let badgeType: string | null = null;
+          try {
+            if (full.anomaly_flags) {
+              const flags = JSON.parse(full.anomaly_flags) as {
+                duplicate_within_24h?: boolean;
+                subscription_jump?: boolean;
+                amount_spike?: boolean;
+              };
+              if (flags.duplicate_within_24h) badgeType = 'duplicate';
+              else if (flags.subscription_jump) badgeType = 'price_jump';
+              else if (flags.amount_spike) badgeType = 'spike';
+            }
+          } catch {
+            // malformed flags — leave badgeType as null
+          }
           sendDismissFeedback(
             full.id,
-            null, // badge_type resolved from anomaly_flags below
+            badgeType,
             full.anomaly_score ?? null,
             full.anomaly_flags ?? null,
             full.imported_payee ?? null,

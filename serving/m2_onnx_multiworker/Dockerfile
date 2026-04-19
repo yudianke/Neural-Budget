@@ -9,4 +9,8 @@ COPY app.py .
 COPY model.onnx .
 COPY gunicorn.conf.py .
 
+EXPOSE 8003
+
+ENV PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_m2
+
 CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]
