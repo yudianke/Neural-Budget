@@ -230,8 +230,41 @@ def main():
     data_source = f"s3://{S3_BUCKET}/{S3_PREFIX}" if aws_key else str(LOCAL_DATA_PATH.parent)
     print(f"Loading training data from: {data_source}")
 
-    X_train, y_train, train_df = load_data("forecasting_train.csv", LOCAL_DATA_PATH)
-    X_eval, y_eval, eval_df   = load_data("forecasting_eval.csv",  LOCAL_EVAL_PATH)
+    # Load raw monthly files
+    train_raw = load_data_csv("forecasting_train.csv", LOCAL_DATA_PATH)
+    eval_raw  = load_data_csv("forecasting_eval.csv",  LOCAL_EVAL_PATH)
+
+    # If simple monthly format: build supervised rows from combined data,
+    # then re-split by month so eval rows have access to train-period lag history
+    if "target_next_month_spend" not in train_raw.columns:
+        print("  Detected simple monthly format — building supervised rows from combined data...")
+        combined = pd.concat([train_raw, eval_raw], ignore_index=True).drop_duplicates()
+        supervised = _build_supervised_rows(combined)
+        print(f"  Built {len(supervised):,} total supervised rows")
+
+        # Re-split by year_month (same split point as batch_pipeline.py: 80/20)
+        all_months = sorted(supervised["year_month"].unique())
+        split_idx  = int(len(all_months) * 0.8)
+        train_months = set(all_months[:split_idx])
+        eval_months  = set(all_months[split_idx:])
+        train_df = supervised[supervised["year_month"].isin(train_months)].copy()
+        eval_df  = supervised[supervised["year_month"].isin(eval_months)].copy()
+        print(f"  Train: {len(train_df):,} rows | Eval: {len(eval_df):,} rows")
+    else:
+        # Already in supervised format — add trig features if missing
+        if "month" not in train_raw.columns:
+            train_raw = _add_trig_features(train_raw)
+            eval_raw  = _add_trig_features(eval_raw)
+        train_df = train_raw
+        eval_df  = eval_raw
+
+    DROP_COLS = ["synthetic_user_id", "year_month"] + [c for c in DROP_AT_TRAIN if c in train_df.columns]
+    TARGET    = "target_next_month_spend"
+
+    X_train = train_df.drop(columns=[c for c in DROP_COLS + [TARGET] if c in train_df.columns])
+    y_train = train_df[TARGET]
+    X_eval  = eval_df.drop(columns=[c for c in DROP_COLS + [TARGET] if c in eval_df.columns])
+    y_eval  = eval_df[TARGET]
 
     # Consistent one-hot encoding across train/eval
     X_train = pd.get_dummies(X_train, dummy_na=True)
