@@ -252,21 +252,16 @@ async function getCategoryPredictions() {
 
   const nextMonthSheetName = monthUtils.sheetForMonth(nextMonth);
 
-  // Build budgetMap keyed by category id → next-month budgeted amount (dollars).
-  // Falls back to current month if next month has no budget entry, so the gap
-  // is still meaningful for users who copy budgets forward.
-  const currentSheetName = monthUtils.sheetForMonth(currentMonth);
-
+  // Build budgetMap keyed by category id → next-month budgeted amount (cents).
+  // Only reads the next-month sheet — no fallback to current month.
+  // This ensures gap_to_budget is null (and the "Use forecasts as budgets" banner
+  // is shown) when the user hasn't budgeted next month yet, rather than silently
+  // borrowing the current month's budget and hiding the actionable banner.
   const budgetMap = new Map<string, number>();
 
   for (const cat of categoryRows) {
-    const nextVal = sheet.get().getCellValue(nextMonthSheetName, `budget-${cat.id}`);
-    const currVal = sheet.get().getCellValue(currentSheetName, `budget-${cat.id}`);
-    // Prefer next month; fall back to current month; 0 if neither is set.
-    const raw = nextVal !== '' && Number(nextVal || 0) !== 0
-      ? nextVal
-      : currVal;
-    budgetMap.set(cat.id, raw === '' ? 0 : Number(raw || 0));
+    const nextVal = sheet.getCellValue(nextMonthSheetName, `budget-${cat.id}`);
+    budgetMap.set(cat.id, nextVal === '' ? 0 : Number(nextVal || 0));
   }
   if (!data || data.length === 0) {
     return {forecasts: [], model_name: 'm3-forecast'};
