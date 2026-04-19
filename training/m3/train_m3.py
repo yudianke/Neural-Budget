@@ -110,21 +110,85 @@ DROP_AT_TRAIN = [
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-def load_data(filename: str, local_path: Path):
-    df = load_data_csv(filename, local_path)
+def _add_trig_features(df: pd.DataFrame) -> pd.DataFrame:
     df["month"] = pd.to_datetime(df["year_month"]).dt.month
-    df["year"] = pd.to_datetime(df["year_month"]).dt.year
-
-    # Trig encoding of month — computable at inference time
+    df["year"]  = pd.to_datetime(df["year_month"]).dt.year
     df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+    return df
+
+
+def _build_supervised_rows(monthly_df: pd.DataFrame, min_history: int = 3) -> pd.DataFrame:
+    """Build supervised lag-feature rows from a simple monthly aggregation.
+
+    Input columns: synthetic_user_id (optional), year_month, project_category, monthly_spend
+    Output: one row per (user, category, month) with lag features and target.
+    """
+    rows = []
+    group_cols = ["synthetic_user_id", "project_category"] if "synthetic_user_id" in monthly_df.columns else ["project_category"]
+
+    for keys, grp in monthly_df.groupby(group_cols):
+        grp = grp.sort_values("year_month").reset_index(drop=True)
+        history  = grp["monthly_spend"].tolist()
+        months   = grp["year_month"].tolist()
+        user_id  = keys[0] if "synthetic_user_id" in monthly_df.columns else "single_user"
+        cat      = keys[-1]
+
+        if len(history) < min_history + 1:
+            continue
+
+        for i in range(min_history, len(history)):
+            prior  = history[:i]
+            prior3 = prior[-3:]
+            prior6 = prior[-6:]
+            target = history[i]
+            month_num = int(months[i][5:7])
+            year      = int(months[i][:4])
+            rows.append({
+                "synthetic_user_id": user_id,
+                "project_category":  cat,
+                "year_month":        months[i],
+                "target_next_month_spend": target,
+                "monthly_spend":     prior[-1],
+                "lag_1":  prior[-1] if len(prior) >= 1 else 0,
+                "lag_2":  prior[-2] if len(prior) >= 2 else 0,
+                "lag_3":  prior[-3] if len(prior) >= 3 else 0,
+                "lag_6":  prior[-6] if len(prior) >= 6 else 0,
+                "rolling_mean_3": float(np.mean(prior3)),
+                "rolling_std_3":  float(np.std(prior3))  if len(prior3) > 1 else 0.0,
+                "rolling_mean_6": float(np.mean(prior6)),
+                "rolling_max_3":  float(np.max(prior3)),
+                "history_month_count": len(prior),
+                "month_num": month_num,
+                "quarter":   (month_num - 1) // 3 + 1,
+                "year":      year,
+                "is_q4":     1 if month_num in [10, 11, 12] else 0,
+                "month_sin": float(np.sin(2 * np.pi * month_num / 12)),
+                "month_cos": float(np.cos(2 * np.pi * month_num / 12)),
+            })
+    return pd.DataFrame(rows)
+
+
+def load_data(filename: str, local_path: Path):
+    df = load_data_csv(filename, local_path)
+
+    # Detect format:
+    # - "supervised" format has target_next_month_spend and lag columns already
+    # - "simple" format has only [synthetic_user_id, year_month, project_category, monthly_spend]
+    if "target_next_month_spend" not in df.columns:
+        print(f"  Detected simple monthly format — building supervised rows...")
+        df = _build_supervised_rows(df)
+        print(f"  Built {len(df):,} supervised rows")
+
+    if "year_month" in df.columns and "month" not in df.columns:
+        df = _add_trig_features(df)
 
     drop_cols = ["synthetic_user_id", "year_month"] + [
         c for c in DROP_AT_TRAIN if c in df.columns
     ]
     target = "target_next_month_spend"
 
-    X = df.drop(columns=drop_cols + [target])
+    X = df.drop(columns=[c for c in drop_cols + [target] if c in df.columns])
     y = df[target]
     return X, y, df
 
