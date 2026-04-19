@@ -1,0 +1,295 @@
+{
+  "uid": "neural-budget-m2",
+  "title": "NeuralBudget — M2 Anomaly Detection",
+  "description": "Operational monitoring for the M2 anomaly detection model with close-the-loop feedback",
+  "tags": ["neural-budget", "m2", "ml-serving", "anomaly-detection"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Model Version",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] }
+        }
+      },
+      "targets": [{
+        "expr": "m2_model_version_numeric",
+        "legendFormat": "Current Version"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Request Rate",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "expr": "rate(http_requests_total{handler=\"/predict/anomaly\"}[1m])",
+        "legendFormat": "req/s"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Dismiss Rate",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "expr": "m2_dismiss_rate",
+        "legendFormat": "Dismiss Rate"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Anomaly Rate",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.3 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "expr": "m2_anomaly_rate",
+        "legendFormat": "Anomaly Rate"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Total Predictions",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        }
+      },
+      "targets": [{
+        "expr": "sum(m2_predictions_total)",
+        "legendFormat": "Total"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "P99 Latency",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 2.0 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{handler=\"/predict/anomaly\"}[5m]))",
+        "legendFormat": "P99"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "Predictions by Badge Type",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 4, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [{
+        "expr": "sum by (badge_type) (m2_predictions_total)",
+        "legendFormat": "{{badge_type}}"
+      }]
+    },
+    {
+      "id": 8,
+      "title": "Dismiss Rate Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 4, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [{
+        "expr": "m2_dismiss_rate",
+        "legendFormat": "Dismiss Rate"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Anomaly Score Distribution",
+      "type": "histogram",
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [{
+        "expr": "m2_anomaly_score_bucket",
+        "legendFormat": "{{le}}"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Per-Rule Dismissals",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50 }
+        }
+      },
+      "targets": [{
+        "expr": "sum by (badge_type) (rate(m2_dismissals_total[5m]))",
+        "legendFormat": "{{badge_type}}"
+      }]
+    },
+    {
+      "id": 11,
+      "title": "Latency Percentiles Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{handler=\"/predict/anomaly\"}[5m]))",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{handler=\"/predict/anomaly\"}[5m]))",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{handler=\"/predict/anomaly\"}[5m]))",
+          "legendFormat": "P99"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Dismissals vs Confirms Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 30 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(m2_dismissals_total[5m]))",
+          "legendFormat": "Dismissals"
+        },
+        {
+          "expr": "rate(m2_confirms_total[5m])",
+          "legendFormat": "Confirms"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Anomaly Rate Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [{
+        "expr": "m2_anomaly_rate",
+        "legendFormat": "Anomaly Rate"
+      }]
+    }
+  ]
+}

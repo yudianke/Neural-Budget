@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: "NeuralBudget"
+    orgId: 1
+    folder: "NeuralBudget"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,115 @@
+###################################################
+# NeuralBudget MLOps Stack
+# Includes M1 + M2 serving, M2 retrain daemon,
+# Prometheus, and Grafana monitoring
+###################################################
+
+services:
+  # --------------------------------------------------
+  # M1 Categorization serving (port 8001)
+  # --------------------------------------------------
+  m1-serving:
+    build:
+      context: ./serving/m1_baseline
+      dockerfile: Dockerfile
+    image: neural-budget-m1-serving
+    ports:
+      - "8001:8001"
+    environment:
+      - MLFLOW_TRACKING_URI=http://129.114.27.211:8000
+      - M1_FEEDBACK_LOG_PATH=/data/feedback/m1_feedback.jsonl
+    volumes:
+      - feedback-data:/data/feedback
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # --------------------------------------------------
+  # M2 Anomaly Detection serving (port 8002)
+  # --------------------------------------------------
+  m2-serving:
+    build:
+      context: ./serving/m2_onnx_multiworker
+      dockerfile: Dockerfile
+    image: neural-budget-m2-serving
+    ports:
+      - "8002:8002"
+    environment:
+      - MLFLOW_TRACKING_URI=http://129.114.27.211:8000
+      - M2_FEEDBACK_LOG_PATH=/data/feedback/m2_feedback.jsonl
+      - M2_CONTAMINATION=0.05
+    volumes:
+      - feedback-data:/data/feedback
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # --------------------------------------------------
+  # M2 Retrain Daemon
+  # --------------------------------------------------
+  m2-retrain-daemon:
+    build:
+      context: .
+      dockerfile: training/m2/Dockerfile.daemon
+    image: neural-budget-m2-daemon
+    environment:
+      - MLFLOW_TRACKING_URI=http://129.114.27.211:8000
+      - M2_SERVING_URL=http://m2-serving:8002
+      - M2_FEEDBACK_LOG_PATH=/data/feedback/m2_feedback.jsonl
+      - M2_DAEMON_STATE_PATH=/data/feedback/m2_daemon_state.json
+      - M2_CONFIG=/app/training/m2/config_m2.yaml
+      - M2_BOOTSTRAP_DATA_PATH=/data/anomaly_train.csv
+      - CHECK_INTERVAL_SECONDS=300
+    volumes:
+      - feedback-data:/data/feedback
+      - training-data:/data
+    depends_on:
+      m2-serving:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --------------------------------------------------
+  # Prometheus (port 9090)
+  # --------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+
+  # --------------------------------------------------
+  # Grafana (port 3000)
+  # --------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=neuralbudget
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/m2_dashboard.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  feedback-data:
+  training-data:
+  prometheus-data:
+  grafana-data:

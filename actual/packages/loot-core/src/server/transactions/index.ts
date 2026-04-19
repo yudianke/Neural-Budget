@@ -9,7 +9,11 @@ import { isPreviewId, isTemporaryId } from '#shared/transactions';
 import type { Diff } from '#shared/util';
 import type { PayeeEntity, TransactionEntity } from '#types/models';
 
-import { persistAnomalyResult, scoreAnomaly } from './ml-service-m2';
+import {
+  persistAnomalyResult,
+  scoreAnomaly,
+  sendDismissFeedback,
+} from './ml-service-m2';
 import * as rules from './transaction-rules';
 import * as transfer from './transfer';
 
@@ -203,6 +207,26 @@ export async function batchUpdateTransactions({
         }
       } catch (err) {
         logger.warn('[M2] anomaly scoring error', err);
+      }
+    }
+  }
+
+  // M2 close-the-loop: when anomaly_dismissed flips to 1, send feedback to M2 serving.
+  if (updated) {
+    for (const u of updated) {
+      if (u.anomaly_dismissed === 1) {
+        const full = allUpdated.find(t => t.id === u.id);
+        if (full) {
+          sendDismissFeedback(
+            full.id,
+            null, // badge_type resolved from anomaly_flags below
+            full.anomaly_score ?? null,
+            full.anomaly_flags ?? null,
+            full.imported_payee ?? null,
+            full.amount ?? null,
+            full.date ?? null,
+          ).catch(() => {});
+        }
       }
     }
   }

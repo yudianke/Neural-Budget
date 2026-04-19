@@ -251,3 +251,57 @@ export async function persistAnomalyResult(
     tables: ['transactions'],
   });
 }
+
+/**
+ * Send dismiss feedback to M2 serving for close-the-loop monitoring.
+ * Called fire-and-forget when user clicks × on anomaly badge.
+ */
+export async function sendDismissFeedback(
+  transId: string,
+  badgeType: string | null,
+  anomalyScore: number | null,
+  ruleFlags: string | null,
+  merchant: string | null,
+  amount: number | null,
+  date: string | null,
+): Promise<void> {
+  const url = `${getM2ServiceUrl()}/feedback`;
+  try {
+    let parsedFlags = null;
+    if (ruleFlags) {
+      try {
+        parsedFlags = JSON.parse(ruleFlags);
+      } catch {
+        // ignore
+      }
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        entries: [
+          {
+            transaction_id: transId,
+            feedback_type: 'dismiss_false_positive',
+            badge_type: badgeType,
+            anomaly_score: anomalyScore,
+            rule_flags: parsedFlags,
+            merchant: merchant || '',
+            amount: amount != null ? amount / 100 : null,
+            date: date || '',
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    logger.info('[M2] dismiss feedback sent', { transId, badgeType });
+  } catch (err) {
+    logger.warn('[M2] dismiss feedback failed (non-fatal)', err);
+  }
+}

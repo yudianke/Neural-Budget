@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY training/m2/requirements-daemon.txt requirements-daemon.txt
+COPY training/m2/requirements_m2.txt requirements_m2.txt
+RUN pip install --no-cache-dir -r requirements-daemon.txt -r requirements_m2.txt
+
+COPY training/_common.py training/_common.py
+COPY training/m2/ training/m2/
+COPY serving/m2_onnx_multiworker/export_to_onnx.py serving/m2_onnx_multiworker/export_to_onnx.py
+
+CMD ["python", "training/m2/retrain_daemon.py"]
