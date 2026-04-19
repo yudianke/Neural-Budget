@@ -1,12 +1,15 @@
 // @ts-strict-ignore
 
 import * as connection from '#platform/server/connection';
+import { logger } from '#platform/server/log';
 import * as db from '#server/db';
-import {incrFetch, whereIn} from '#server/db/util';
-import {batchMessages} from '#server/sync';
-import type {Diff} from '#shared/util';
-import type {PayeeEntity, TransactionEntity} from '#types/models';
+import { incrFetch, whereIn } from '#server/db/util';
+import { batchMessages } from '#server/sync';
+import { isPreviewId, isTemporaryId } from '#shared/transactions';
+import type { Diff } from '#shared/util';
+import type { PayeeEntity, TransactionEntity } from '#types/models';
 
+import { persistAnomalyResult, scoreAnomaly } from './ml-service-m2';
 import * as rules from './transaction-rules';
 import * as transfer from './transfer';
 
@@ -188,6 +191,25 @@ export async function batchUpdateTransactions({
             updatedPayeeIds: newPayeeIds,
           });
         }
+      }
+    }
+  }
+
+  // M2 anomaly scoring — synchronous so the badge appears immediately.
+  for (const t of resultAdded) {
+    if (t.id && !isTemporaryId(t.id) && !isPreviewId(t.id)) {
+      try {
+        const result = await scoreAnomaly(t);
+        if (result) {
+          logger.info('[M2] persisting anomaly result for', t.id);
+          await persistAnomalyResult(t.id, result);
+          // Patch the returned transaction so the frontend gets anomaly data immediately
+          t.anomaly_score = result.anomaly_score;
+          t.anomaly_flags = JSON.stringify(result.rule_flags);
+          t.anomaly_dismissed = 0;
+        }
+      } catch (err) {
+        logger.warn('[M2] anomaly scoring error', err);
       }
     }
   }

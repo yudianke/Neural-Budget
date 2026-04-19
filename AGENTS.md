@@ -9,104 +9,233 @@
 We are building a **Smart Finance Assistant** as an optional ML layer on top of **ActualBudget** (github.com/actualbudget/actual, ~15k stars), a self-hosted open-source personal finance app. The system is deployed on **Chameleon Cloud**. Target: 10–300 users per instance. ActualBudget remains fully functional without the ML features.
 
 ### Three ML Features
-1. **M1 — Transaction Auto-Categorization**: Predicts spending category from payee name + amount. Auto-fills if confidence ≥ 0.6; shows top-3 suggestions if < 0.6.
-2. **M2 — Anomaly Detection**: Flags duplicates, subscription price jumps, statistical outliers via warning badge. Inactive until user has ≥ 50 transactions. Isolation Forest + deterministic rules.
-3. **M3 — Budget Forecasting**: Predicts next-month spending per category. Prophet for discretionary; deterministic for recurring bills. Falls back to MoneyData priors if < 12 months history.
+1. **M1 — Transaction Auto-Categorization** ✅ INTEGRATED: Predicts spending category from payee name + amount. Auto-fills if confidence ≥ 0.6; shows top-3 suggestions if < 0.6.
+2. **M2 — Anomaly Detection** 🔄 INTEGRATED: Flags duplicates, subscription price jumps, statistical outliers via warning badge. Inactive until user has ≥ 50 transactions. Isolation Forest + deterministic rules.
+3. **M3 — Budget Forecasting** ⏳ INTEGRATED: Predicts next-month spending per category. Prophet for discretionary; deterministic for recurring bills. Falls back to MoneyData priors if < 12 months history.
+
+---
+
+## Current Integration Status
+
+### M1 — PARTIAL COMPLETE ✅
+M1 is fully wired end-to-end: training → FastAPI serving → loot-core client → React UI.
+
+**What works:**
+- Create a transaction with a known payee + non-zero amount → M1 predicts, auto-fills category if confidence ≥ 0.6
+- M1 service down → transaction save is unaffected (errors swallowed to null)
+- Fresh repo clone → migration `1776000000000_add_m1_categories.js` seeds all 13 M1-compatible categories automatically
+- snake_case ↔ Title Case label resolution works (`personal_care` → `Personal Care`)
+
+**Key files changed for M1:**
+- `serving/m1_baseline/server.py` — added CORS middleware
+- `serving/m1_baseline/real_model.py` — fixed feature skew, MLflow fallback, label encoder rebuild
+- `serving/m1_baseline/schemas.py` — added optional fields with defaults
+- `packages/loot-core/src/server/transactions/ml-service.ts` — new HTTP client for M1
+- `packages/loot-core/src/server/transactions/transaction-rules.ts` — M1 called after user rules
+- `packages/loot-core/migrations/1776000000000_add_m1_categories.js` — seeds 13 categories
+- `actual/docker-compose.yml` — M1_SERVICE_URL, host.docker.internal, node_modules volumes
+
+**Known M1 limitations (do not fix during M2 work):**
+- `historical_majority_category_for_payee` is in the schema but not a trained feature — cold-start payees fall back to `misc`
+- Top-3 suggestion UI not yet implemented
+- `yarn typecheck` / `yarn lint:fix` not yet run on loot-core changes
+- Oddity: older Utility transactions appeared to flip category after adding a new Dominion Power transaction — not reproduced, suspected browser cache artifact
+
+### M2 — INTEGRATION STARTING NOW 🔄
+The trained M2 model artifact exists on MLflow. Serving and UI wiring have not been done yet.
+
+**MLflow artifact details:**
+- MLflow UI: `http://129.114.27.211:8000/#/experiments`
+- Artifact path: `mlflow-artifacts:/2/<Run ID>/artifacts/model.pkl`
+- Direct download: `http://129.114.27.211:8000/ajax-api/2.0/mlflow/logged-models/m-c0a5e85dd6b0494ba3b1fa394db99480/artifacts/files?artifact_file_path=model.pkl`
+
+### M3 — NOT STARTED ⏳
 
 ---
 
 ## Repository Structure
 ```
 E:.
-├── actual/                    # ActualBudget open-source app (TypeScript/React)
-├── datasets/                  # Raw + synthetic data files
-│   ├── ces_household_category_spend.csv
-│   ├── fmli241x.csv           # BLS Consumer Expenditure Survey (FMLI)
-│   ├── moneydata.csv           # Raw MoneyData (EUROVIS 2023)
-│   ├── moneydata_labeled.csv   # Labeled MoneyData with project categories
-│   ├── mtbi241x.csv            # BLS CES expenditure items
-│   ├── synthetic_transactions.csv
-│   └── synthetic_users.csv
-├── data_pipeline/
-│   └── generate_synthetic.py
-├── serving/
-│   ├── benchmark/benchmark_requests.py
-│   ├── m1_baseline/           # FastAPI baseline (CPU)
-│   ├── m1_onnx/               # ONNX-optimized serving
-│   ├── m1_onnx_multiworker/   # Gunicorn multi-worker ONNX
-│   ├── m1_rayserve_bonus/     # Ray Serve bonus implementation
-│   └── samples/               # JSON input/output samples for M1, M2, M3
-├── training/
-│   ├── m1/                    # XGBoost categorization training
-│   │   ├── train_m1.py
-│   │   ├── config_*.yaml      # Multiple config files (baseline, logreg, xgb variants)
-│   │   ├── Dockerfile.m1
-│   │   └── data/moneydata.csv
-│   ├── m1_ray/                # Ray Train integration (bonus)
-│   ├── m2/                    # Isolation Forest anomaly detection
-│   │   ├── train_m2.py
-│   │   ├── config_m2*.yaml
-│   │   └── Dockerfile.m2
-│   └── m3/                    # Prophet forecasting
-│       ├── train_m3.py
-│       ├── config_m3*.yaml
-│       └── Dockerfile.m3
-└── upcoming-release-notes/
+Neural-Budget
+├── AGENTS.md
+├── README.md
+├── data_pipeline
+│   ├── batch_pipeline.py
+│   ├── generate_synthetic.py
+│   ├── generator.py
+│   ├── ingest_data.py
+│   ├── manifest.json
+│   └── online_features.py
+├── serving
+│   ├── benchmark
+│   │   └── benchmark_requests.py
+│   ├── m1_baseline
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   ├── inspect_model.py
+│   │   ├── mock_model.py
+│   │   ├── real_model.py
+│   │   ├── requirements.txt
+│   │   ├── schemas.py
+│   │   ├── server.py
+│   │   └── test_load.py
+│   ├── m1_onnx
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   ├── app.py
+│   │   ├── export_to_onnx.py
+│   │   ├── model.onnx
+│   │   └── requirements.txt
+│   ├── m1_onnx_multiworker
+│   │   ├── Dockerfile
+│   │   ├── app.py
+│   │   ├── gunicorn.conf.py
+│   │   ├── model.onnx
+│   │   └── requirements.txt
+│   ├── m1_rayserve_bonus
+│   │   ├── Dockerfile
+│   │   ├── model.onnx
+│   │   ├── requirements.txt
+│   │   ├── run_serve.py
+│   │   └── serve_app.py
+│   └── samples
+│       ├── m1_input.json
+│       ├── m1_output.json
+│       ├── m2_input.json
+│       ├── m2_output.json
+│       ├── m3_input.json
+│       └── m3_output.json
+└── training
+    ├── _common.py
+    ├── m1
+    │   ├── Dockerfile.m1
+    │   ├── config_baseline.yaml
+    │   ├── config_logreg.yaml
+    │   ├── config_m1.yaml
+    │   ├── config_xgb_v2.yaml
+    │   ├── config_xgb_v3.yaml
+    │   ├── config_xgb_v4.yaml
+    │   ├── requirements.txt
+    │   └── train_m1.py
+    ├── m1_ray
+    │   ├── Dockerfile.m1_ray
+    │   ├── config_m1_ray.yaml
+    │   ├── ft_demo_output.log
+    │   ├── requirements_ray.txt
+    │   ├── train_m1_ray.py
+    │   └── train_m1_ray_ft_demo.py
+    ├── m2
+    │   ├── Dockerfile.m2
+    │   ├── config_m2.yaml
+    │   ├── config_m2_v2.yaml
+    │   ├── config_m2_v3.yaml
+    │   ├── requirements_m2.txt
+    │   └── train_m2.py
+    └── m3
+        ├── Dockerfile.m3
+        ├── config_m3.yaml
+        ├── config_m3_v2.yaml
+        ├── config_m3_v3.yaml
+        ├── requirements_m3.txt
+        └── train_m3.py
 ```
 
 ---
 
-## External Datasets
+## Claude Code Task: M2 Integration (Read This Section Carefully)
 
-### MoneyData (Firat et al., EUROVIS 2023)
-- First publicly available real-world anonymized retail bank transaction dataset
-- 7 years (July 2015–2022), 6,500+ transactions, single UK retail bank customer
-- Fields: date, transaction_type, description, debit_amount, credit_amount, balance
-- 20 manually verified spending categories
-- Peer-reviewed, University of Nottingham
-- **Usage**: Primary training data for M1; bootstraps M2 normal distributions; cold-start priors for M3
+**Your job is to plan ONLY — do NOT write any code yet.**
 
-### BLS Consumer Expenditure Survey (CES/FMLI)
-- `fmli241x.csv`: Household-level demographic and financial data (income, family size, region, spending categories)
-- `mtbi241x.csv`: Individual expenditure items (UCC codes, costs, reference months)
-- **Usage**: Cross-user diversity simulation, cold-start traffic, anomaly threshold calibration, heterogeneous forecasting
+### Step 1: Read these files in order
+1. `AGENTS.md` (this file) — project context and constraints
+2. `training/m2/train_m2.py` — understand what the model is, what features it expects, what it outputs
+3. `training/m2/config_m2*.yaml` — understand hyperparameters and training config
+4. `serving/m1_baseline/` — read ALL files  as your serving template
+5. `serving/m1_onnx_multiworker/` — read ALL files as the preferred production pattern to follow for M2
+6. `data_pipeline/generate_synthetic.py` — understand how synthetic data was created (already done, do not regenerate)
+7. `serving/samples/` — find the M2 sample input/output JSON files
 
-### Synthetic Data Strategy
-- MoneyData split into 7 yearly windows → `user_1` through `user_7` (~938 txns each, 12 months)
-- CES/FMLI household priors perturb category mix, amount distributions, recurring cadence
-- All preprocessing logic, partition versions, perturbation configs, dataset snapshot hashes logged in MLflow
+### Step 2: Scan ActualBudget UI to identify M2 integration points
+Look in `actual/packages/desktop-client/src/components/`:
+- `transactions/` — where the transaction table lives (M1 auto-fill happened here)
+- `budget/` — budget page (M3 will go here, ignore for now)
+- Identify: where should anomaly warning badges appear? What React component renders each transaction row?
+
+Also look at:
+- `packages/loot-core/src/server/transactions/transaction-rules.ts` — where M1 was hooked in; M2 will hook in nearby
+- `packages/loot-core/src/server/transactions/ml-service.ts` — M1 HTTP client; M2 needs its own equivalent
+
+### Step 3: Answer these questions before planning anything
+1. What exact features does `train_m2.py` use? List them with types.
+2. Does the trained `model.pkl` contain the Isolation Forest only, or also the scaler/preprocessor?
+3. What does M2 output — a float score, a boolean, both? What is the threshold?
+4. Does M2 need to be called synchronously (blocking transaction save) or async (badge shown after)? Per spec: **async, < 5s, badge shown after sync**.
+5. Which transaction row React component in `desktop-client` would host the anomaly badge?
+6. What are the deterministic rules (duplicate within 24h, subscription jump) — are these implemented in `train_m2.py` or will they need to be implemented separately in the serving layer?
+
+### Step 4: Propose the minimal plan
+
+Give me a numbered plan with these sections:
+
+**A. Serving layer** (new folder and files `serving/m2_onnx_multiworker/`)
+- How to download the newest model.pkl from MLflow (Now the m1_baseline only download one model not auto always download and use the best one, you can learn from it to learn the pattern)
+- What port M2 runs on (suggest 8002 to avoid collision with M1 on 8001)
+- What the `/predict` endpoint looks like (input schema → output schema)
+- How to handle the deterministic rules (duplicate / subscription jump) — in the serving layer or in loot-core?
+- Whether ONNX conversion makes sense for Isolation Forest (it does — sklearn-onnx supports it)
+
+**B. loot-core changes**
+- New file: `ml-service-m2.ts` (mirror of `ml-service.ts` for M1)
+- Where in `transaction-rules.ts` to call M2 (after M1, async, non-blocking)
+- How to pass the computed features (amount_zscore, frequency_ratio, rolling stats, repeat_count, is_recurring_candidate) — which of these are already on the transaction object vs. need to be computed fresh
+- Whether rolling stats need a DB query and how expensive that is
+
+**C. UI changes**
+- Which component gets the anomaly badge
+- What the badge looks like (warning icon, dismiss button)
+- Where the user confirmation/dismissal gets logged as feedback
+
+**D. Docker / docker-compose changes**
+- New service for M2 at port 8002
+- M2_SERVICE_URL env var in Actual container
+
+**E. Migration (if needed)**
+- Does M2 require any new DB columns (e.g., `anomaly_score`, `anomaly_dismissed`) on the transactions table?
+
+**F. What to skip for now**
+- Anything that is explicitly out of scope for the local end-to-end demo (Chameleon deployment, retraining pipeline, monitoring)
 
 ---
 
 ## Model Details
 
-### M1 — TF-IDF + XGBoost (Categorization)
+### M1 — TF-IDF + XGBoost (Categorization) ✅
 - **Preprocessing**: Payee names normalized (strip txn IDs, resolve aliases e.g. AMZN → Amazon)
 - **Features**: TF-IDF character n-grams (n=3–5, 500 features), log-amount, day-of-week, day-of-month, account type, historical majority category for payee
 - **Training**: Chronological split; candidate promotes only when macro-F1 improves with < 2% regression on top-20 categories, else auto-rollback
 - **Retraining**: Weekly, or immediately upon ≥ 50 corrections
 - **Output**: Predicted category + softmax confidence + top-3 suggestions; auto-fill if ≥ 0.6
+- **Serving port**: 8001
 
-### M2 — Isolation Forest + Rules (Anomaly Detection)
+### M2 — Isolation Forest + Rules (Anomaly Detection) 🔄
 - **Cold-start guard**: Inactive until user has ≥ 50 transactions
 - **Rules**: Exact duplicates (same merchant + amount within 24h), subscription jumps (≥ 2× usual charge)
 - **Features**: amount z-score (vs per-category baseline), frequency ratio vs weekly avg, rolling 30d spend mean/std, M1 confidence, transaction type, repeat count, is_recurring_candidate
 - **Bootstrapping**: MoneyData 7-year spending history for initial per-category distributions
 - **Retraining**: Weekly threshold recalibration from dismissal feedback, targeting ~1–3 alerts/week/user
+- **Serving port**: 8002 (proposed)
+- **Calling pattern**: ASYNC — M1 fills category first (sync), M2 scores anomaly after (async, badge shown < 5s)
 
-### M3 — Prophet (Forecasting)
-- **Separation**: Recurring bills (rent, subscriptions) forecast deterministically; Prophet handles discretionary only
-- **Features**: Monthly category spend (12–18 months), month-of-year, holiday indicator, recurring-bill component
-- **Cold-start**: Users with < 12 months history fall back to MoneyData-derived per-category monthly averages
-- **Retraining**: Monthly; month M trained exclusively on data prior to M
-- **Output**: Point forecast + confidence interval per category
+### M3 — Prophet (Forecasting) ⏳
+- **Serving port**: 8003 (proposed, TBD)
 
 ---
 
 ## JSON Interface Contracts
 
-### M1 Input
+### M1 Input / Output (reference — already implemented)
 ```json
+// Input
 {
   "transaction_id": "txn_000000001",
   "synthetic_user_id": "user_1",
@@ -121,13 +250,10 @@ E:.
   "log_abs_amount": 0.8415671856782186,
   "historical_majority_category_for_payee": "restaurants"
 }
-```
 
-### M1 Output
-```json
+// Output
 {
   "transaction_id": "txn_000000001",
-  "synthetic_user_id": "user_1",
   "predicted_category": "restaurants",
   "confidence": 0.91,
   "top_3_suggestions": [
@@ -140,8 +266,9 @@ E:.
 }
 ```
 
-### M2 Input
+### M2 Input / Output (target — to be served)
 ```json
+// Input
 {
   "transaction_id": "txn_000000001",
   "synthetic_user_id": "user_1",
@@ -159,10 +286,8 @@ E:.
   "repeat_count": 1,
   "is_recurring_candidate": 0
 }
-```
 
-### M2 Output
-```json
+// Output
 {
   "transaction_id": "txn_000000001",
   "synthetic_user_id": "user_1",
@@ -179,8 +304,9 @@ E:.
 }
 ```
 
-### M3 Input
+### M3 Input / Output (reference only, not current task)
 ```json
+// Input
 {
   "synthetic_user_id": "user_1",
   "forecast_month": "2024-02",
@@ -197,10 +323,8 @@ E:.
     "utilities": 53.0
   }
 }
-```
 
-### M3 Output
-```json
+// Output
 {
   "synthetic_user_id": "user_1",
   "forecast_month": "2024-02",
@@ -218,116 +342,40 @@ E:.
 
 ## Serving Requirements
 
-| Component        | Latency Target       | Mode         | Notes                              |
-|------------------|---------------------|--------------|------------------------------------|
-| Categorization   | < 0.5s per txn      | Synchronous  | Inline with import                 |
-| Anomaly scoring  | < 5s                | Asynchronous | Badge shown after sync             |
-| Forecasting      | Background job      | Batch        | Hourly/daily refresh               |
-| Typical load     | 1–5 req/s           |              | Normal usage                       |
-| Peak load        | ~50 req/s           |              | Batch bank-sync events             |
+| Component        | Latency Target       | Mode         | Port  | Notes                              |
+|------------------|---------------------|--------------|-------|------------------------------------|
+| Categorization   | < 0.5s per txn      | Synchronous  | 8001  | Inline with import ✅              |
+| Anomaly scoring  | < 5s                | Asynchronous | 8002  | Badge shown after sync 🔄          |
+| Forecasting      | Background job      | Batch        | 8003  | Hourly/daily refresh ⏳            |
+| Typical load     | 1–5 req/s           |              |       | Normal usage                       |
+| Peak load        | ~50 req/s           |              |       | Batch bank-sync events             |
 
 - 2–3 Chameleon VM replicas behind load balancer, CPU-only
-- TF-IDF vectorization + XGBoost inference < 10ms per txn on CPU
 - Isolation Forest scoring sub-millisecond on 6-feature vector
 
-### Serving Variants Implemented
-- `m1_baseline/` — FastAPI, CPU, simplest reference
+### Serving Variants (M1 reference — mirror pattern for M2)
+- `m1_baseline/` — FastAPI, CPU, simplest reference ← start here for understanding
 - `m1_onnx/` — ONNX-optimized model serving
-- `m1_onnx_multiworker/` — Gunicorn multi-worker ONNX
-- `m1_rayserve_bonus/` — Ray Serve (bonus)
-
----
-
-## Data Pipeline Design
-
-### Ingestion Flow
-1. Transactions arrive via bank sync or CSV upload (timestamp, amount, payee, account)
-2. Payee strings lowercased, stripped of transaction IDs → TF-IDF vectorization for M1
-3. Amount, frequency, rolling statistics → 6-feature numeric vector for M2
-4. Feature construction uses only historical data prior to each transaction
-5. Rolling per-payee and per-category statistics updated asynchronously
-6. Aggregated monthly category totals for M3
-
-### Leakage Prevention
-- Training examples include only confirmed labels (accepted suggestions or user corrections)
-- All dataset splits strictly chronological
-- Aggregate features computed on training data only; frozen statistics applied to validation/test
-- M3 uses only data from prior months
-- Feedback events excluded from the training set of the model version that generated them
-
-### Feedback & Continuous Retraining Loop
-- Every user action (category corrections, anomaly confirmations, budget edits) → immutable feedback log versioned alongside model artifacts in MLflow
-- M1: Weekly retraining or upon ≥ 50 corrections; promote only if macro-F1 improves without > 2% regression on top-20 categories
-- M2: Weekly per-user Isolation Forest threshold recalibration from dismissal feedback
-- M3: Monthly retrain from updated per-category spending totals
-- Business metrics monitored: user-correction rate, average time-to-correction
-
----
-
-## Deployment & Infrastructure
-
-### Chameleon Cloud
-- All runs executed on Chameleon inside containers
-- Resource naming: include project ID (e.g. `proj99`) as suffix
-- MLflow service running on Chameleon, browsable by course staff
-- Object storage for large datasets and model checkpoints
-- Block storage for small application state
-- Floating IP on one compute instance as jump host
-
-### Training Infrastructure
-- All training tracked in MLflow (config params, model quality metrics, training cost metrics, environment info)
-- One training script per framework per prediction task
-- Candidates/hyperparameters selected via YAML config files
-- Data-snapshot hashes and git commits logged per MLflow run
-
-### Docker Containers
-- `Dockerfile.m1` — M1 training container
-- `Dockerfile.m2` — M2 training container
-- `Dockerfile.m3` — M3 training container
-- `serving/m1_baseline/Dockerfile` — M1 baseline serving
-- `serving/m1_onnx/Dockerfile` — M1 ONNX serving
-- `serving/m1_onnx_multiworker/Dockerfile` — M1 multi-worker serving
-- `serving/m1_rayserve_bonus/Dockerfile` — M1 Ray Serve
-
----
-
-## System Integration (Apr 20 milestone)
-
-### Requirements
-- Single integrated ML system running on Chameleon
-- End-to-end plumbing: production data → feature computation → inference → feedback capture → retraining → evaluation → packaging → deployment → rollback/update
-- Workflows automated with minimal human intervention (manual approval for canary → production OK, but not SSH + manual commands)
-- ML features implemented in ActualBudget's UI:
-  - Categorization: auto-filled field or ranked suggestion dropdown
-  - Anomaly: warning badges requiring explicit user confirmation/dismissal
-  - Forecasting: suggested envelope budget targets in budget view
-- All interactions logged as feedback for next retraining cycle
-- De-duplicated shared infrastructure (single MLflow, single monitoring stack, single training data bucket)
-
-### Per-Role Responsibilities (System Integration)
-- **Training**: Model quality evaluation with gates; registered models only if passing quality checks
-- **Serving**: Monitor deployed model behavior (outputs, operational metrics, user feedback); triggers for promotion/rollback
-- **Data**: Data quality evaluation at ingestion, training set compilation, and live inference; drift monitoring
-
-### Safeguarding Plan
-Must implement concrete mechanisms for: fairness, explainability, transparency, privacy, accountability, robustness.
-
-### Environments (3-person team)
-- CI/CD with retraining and model promotion with well-justified rules
-- Automated model rollback if production system degrades
+- `m1_onnx_multiworker/` — Gunicorn multi-worker ONNX ← preferred production pattern
 
 ---
 
 ## ActualBudget Integration Points
 
-### Key Files/Directories in ActualBudget
+### Key Files/Directories
 - `actual/packages/loot-core/` — Core business logic, DB, server, rules, transactions, budget
 - `actual/packages/desktop-client/src/components/` — React UI components
-  - `budget/` — Budget page components (where M3 forecasts surface)
-  - `transactions/` — Transaction table (where M1 categorization integrates)
+  - `budget/` — Budget page components (where M3 forecasts will surface)
+  - `transactions/` — Transaction table (where M1 is integrated; M2 badge goes here)
   - `accounts/` — Account views
 - `actual/packages/sync-server/` — Sync server (Node.js/Express)
 - `actual/packages/api/` — API layer
+
+### M1 Integration Files (use as exact template for M2)
+- `packages/loot-core/src/server/transactions/ml-service.ts` — HTTP client pattern
+- `packages/loot-core/src/server/transactions/transaction-rules.ts` — hook point
+- `packages/loot-core/migrations/1776000000000_add_m1_categories.js` — migration pattern
+- `actual/docker-compose.yml` — how M1_SERVICE_URL and host.docker.internal are configured
 
 ### ActualBudget Tech Stack
 - Frontend: React + TypeScript
@@ -336,65 +384,57 @@ Must implement concrete mechanisms for: fairness, explainability, transparency, 
 - Desktop: Electron
 - Database migrations in `loot-core/migrations/`
 
+
 ---
 
-## AI Coding Workflow (for ActualBudget integration)
+## External Datasets
 
-### Best Practices
-1. Always start from a working system state
-2. Change one smallest meaningful observable unit at a time
-3. Isolate each unit in its own branch and merge when validated
-4. Define success (pass/fail) before coding
-5. Put the agent in the eval loop (push, deploy, verify)
-6. Optimize for human review throughput
+### MoneyData (Firat et al., EUROVIS 2023)
+- First publicly available real-world anonymized retail bank transaction dataset
+- 7 years (July 2015–2022), 6,500+ transactions, single UK retail bank customer
+- Fields: date, transaction_type, description, debit_amount, credit_amount, balance
+- 20 manually verified spending categories
+- **Usage**: Primary training data for M1; bootstraps M2 normal distributions; cold-start priors for M3
 
-### OpenCode Configuration
-- Use Portkey via NYU AI gateway (requires NYU VPN)
-- Models: Claude Haiku 4.5, Sonnet 4.5/4.6, Opus 4.5/4.6
-- Budget: $20/week per student
-- Playwright MCP available for browser-based validation
+### BLS Consumer Expenditure Survey (CES/FMLI)
+- **Usage**: Cross-user diversity simulation, cold-start traffic, anomaly threshold calibration, heterogeneous forecasting
 
-### AI Use Policy
-- Human owns the design; LLM helps implement
-- Must understand all generated code
-- No silent design changes by LLM
-- Disclosure required on commits with LLM-generated code
-- All reports/documentation written by humans only
-- Integration with ActualBudget codebase is exempt from "understand everything" policy — AI coding agents explicitly encouraged for this part
+### Synthetic Data (already generated — do not regenerate)
+- MoneyData split into 7 yearly windows → `user_1` through `user_7`
+- CES/FMLI household priors perturb category mix, amount distributions, recurring cadence
+- All preprocessing versioned in MLflow
 
 ---
 
 ## Dataset Schemas
 
-### moneydata.csv (raw)
-```
-Transaction Date, Transaction Type, Transaction Description, Debit Amount, Credit Amount, Balance
-25/07/2022, BP, SAVE THE CHANGE, 3.11, , 541.43
-```
-
-### moneydata_labeled.csv
-```
-date, transaction_type, merchant, debit_amount, credit_amount, balance, amount, project_category
-2022-07-25, BP, SAVE THE CHANGE, 3.11, 0.0, 541.43, -3.11, misc
-```
-
-### synthetic_transactions.csv
+### synthetic_transactions.csv (M2 features sourced from here)
 ```
 synthetic_user_id, source_household_id, persona_cluster, date, merchant, project_category,
 transaction_type, amount, is_synthetic, transaction_id, abs_amount, day_of_week, day_of_month,
 month, log_abs_amount, abs_amount_rounded, repeat_count, is_recurring_candidate
 ```
 
-### synthetic_users.csv
-```
-synthetic_user_id, source_household_id, [13 category spend columns], AGE_REF, SEX_REF,
-FAM_SIZE, FINLWT21, user_scale, persona_cluster
-```
-
-### ces_household_category_spend.csv
-```
-household_id, category, annual_spend
-```
-
 ### Project Categories (20 classes)
 charity, education, entertainment, gas, groceries, healthcare, housing, misc, personal_care, restaurants, shopping, transport, utilities, cash_transfers, and others from MoneyData mapping.
+
+---
+
+## Deployment & Infrastructure
+
+### Chameleon Cloud
+- All runs executed on Chameleon inside containers
+- MLflow: `http://129.114.27.211:8000`
+- Object storage for large datasets and model checkpoints
+
+### Docker Containers
+- `Dockerfile.m1` — M1 training
+- `Dockerfile.m2` — M2 training
+- `Dockerfile.m3` — M3 training
+- `serving/m1_baseline/Dockerfile` — reference for M2 serving Dockerfile
+- `serving/m1_onnx_multiworker/Dockerfile` — preferred production pattern
+
+---
+
+## Safeguarding Plan
+Must implement concrete mechanisms for: fairness, explainability, transparency, privacy, accountability, robustness.

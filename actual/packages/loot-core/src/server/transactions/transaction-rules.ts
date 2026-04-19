@@ -380,6 +380,10 @@ export async function runRules(
     }
   }
 
+  // M2 anomaly scoring is handled in batchUpdateTransactions (index.ts)
+  // after the transaction is inserted, so the badge data is returned
+  // to the frontend immediately.
+
   return await finalizeTransactionForRules(finalTrans);
 }
 

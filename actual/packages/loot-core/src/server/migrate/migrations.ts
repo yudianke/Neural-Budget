@@ -16,6 +16,7 @@ import m1765518577215 from '../../../migrations/1765518577215_multiple_dashboard
 import m1776000000000 from '../../../migrations/1776000000000_add_m1_categories';
 import m1776000000001 from '../../../migrations/1776000000001_fix_m1_category_mapping';
 import m1776000000002 from '../../../migrations/1776000000002_add_cash_transfers_category';
+import m1776000000003 from '../../../migrations/1776000000003_add_m2_anomaly';
 
 let MIGRATIONS_DIR = fs.migrationsPath;
 
@@ -28,6 +29,7 @@ const javascriptMigrations = {
   1776000000000: m1776000000000,
   1776000000001: m1776000000001,
   1776000000002: m1776000000002,
+  1776000000003: m1776000000003,
 };
 
 export async function withMigrationsDir(
