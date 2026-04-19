@@ -51,9 +51,11 @@ CONTAINER_NAME    = os.environ.get("M1_SERVING_CONTAINER", "m1-serving")
 CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 MODEL_NAME        = "m1-ray-categorization"
 
-CORRECTION_THRESHOLD  = 20      # new overrides since last retrain → trigger
-ROLLBACK_RATE_DELTA   = 0.15    # 15% worse correction rate → rollback
-ROLLBACK_WINDOW_HOURS = 24      # hours to wait before evaluating rollback
+CORRECTION_THRESHOLD      = 20      # new overrides since last retrain → trigger
+ROLLBACK_RATE_DELTA       = 0.15    # 15% worse correction rate → rollback
+ROLLBACK_WINDOW_HOURS     = 24      # hours to wait before evaluating rollback
+FAILURE_BACKOFF_MINUTES   = 60      # wait this long after a failed retrain before retrying
+RELOAD_MAX_RETRIES        = 3       # give up on pending reload after this many attempts
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -82,6 +84,14 @@ def _load_state() -> dict:
         "last_correction_count": 0,
         "prev_correction_rate": None,
         "rollback_check_due": None,
+        # #6: backoff state for failed retrains
+        "consecutive_failures": 0,
+        "last_failed_at": None,
+        # #9: explicit pre-retrain version for rollback (not version-1 heuristic)
+        "version_before_last_retrain": None,
+        # P2: pending reload retry state
+        "pending_reload_version": None,
+        "pending_reload_retries": 0,
     }
 
 
@@ -172,7 +182,8 @@ def _run_retrain() -> bool:
 
     env = os.environ.copy()
     env["M1_FEEDBACK_INPUT"] = str(FEEDBACK_PATH)
-    env["M1_FEEDBACK_OUTPUT"] = str(FEEDBACK_PATH.parent / "m1_feedback_dataset.csv")
+    # #8: shell script reads M1_FEEDBACK_DATASET, not M1_FEEDBACK_OUTPUT
+    env["M1_FEEDBACK_DATASET"] = str(FEEDBACK_PATH.parent / "m1_feedback_dataset.csv")
     env["M1_RAY_CONFIG"] = CONFIG_PATH
     env["M1_RAY_DATA_PATH"] = BOOTSTRAP_PATH
     env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
@@ -203,7 +214,7 @@ def _run_retrain() -> bool:
 # Hot-reload
 # ---------------------------------------------------------------------------
 def _trigger_reload() -> bool:
-    """POST /admin/reload to m1-serving."""
+    """POST /admin/reload to m1-serving. Returns True if request succeeded."""
     try:
         resp = requests.post(f"{M1_SERVING_URL}/admin/reload", timeout=10)
         if resp.ok:
@@ -212,6 +223,38 @@ def _trigger_reload() -> bool:
         log.warning(f"Reload returned {resp.status_code}: {resp.text}")
     except Exception as e:
         log.warning(f"Reload request failed: {e}")
+    return False
+
+
+def _verify_deployed_version(expected_version: str, wait_seconds: int = 15) -> bool:
+    """Poll /health until model_version matches expected_version or timeout.
+
+    The reload happens in a background thread inside the serving process, so
+    we need to wait for it to complete before we can confirm the version.
+    Returns True only when /health reports the exact expected version.
+    """
+    import time as _time
+    deadline = _time.monotonic() + wait_seconds
+    while _time.monotonic() < deadline:
+        try:
+            resp = requests.get(f"{M1_SERVING_URL}/health", timeout=5)
+            if resp.ok:
+                data = resp.json()
+                actual = str(data.get("model_version", ""))
+                if actual == str(expected_version):
+                    log.info(f"Confirmed deployed version: v{actual}")
+                    return True
+                if data.get("status") == "degraded":
+                    log.warning("Serving reports degraded — model load failed")
+                    return False
+        except Exception as e:
+            log.warning(f"Health check failed during version verification: {e}")
+        _time.sleep(3)
+
+    log.warning(
+        f"Version verification timed out after {wait_seconds}s — "
+        f"expected v{expected_version}"
+    )
     return False
 
 
@@ -317,9 +360,17 @@ def run():
                                     f"Correction rate degraded {prev_rate:.1%} → {current_rate:.1%} "
                                     f"(threshold {ROLLBACK_RATE_DELTA:.0%}). Rolling back."
                                 )
-                                prev_version = int(last_version) - 1
-                                if prev_version >= 1:
-                                    _rollback_to_version(prev_version)
+                                # #9: use explicitly stored pre-retrain version, not version-1 heuristic
+                                rollback_target = state.get("version_before_last_retrain")
+                                if rollback_target is None:
+                                    # Legacy state: fall back to version-1 but warn
+                                    rollback_target = str(int(last_version) - 1)
+                                    log.warning(
+                                        f"version_before_last_retrain not in state, "
+                                        f"using heuristic v{rollback_target}"
+                                    )
+                                if int(rollback_target) >= 1:
+                                    _rollback_to_version(int(rollback_target))
                             else:
                                 log.info("Correction rate acceptable — keeping new model.")
                                 _log_event_to_mlflow("rollback_check_passed", {
@@ -330,6 +381,69 @@ def run():
 
                     state["rollback_check_due"] = None
                     _save_state(state)
+
+            # ----------------------------------------------------------------
+            # 1b. Retry pending reload (P2 fix)
+            # A previous retrain registered a new version but the reload failed.
+            # Retry until confirmed or max retries reached.
+            # Corrections are preserved (watermark not advanced) until reload succeeds.
+            # ----------------------------------------------------------------
+            if state.get("pending_reload_version"):
+                pending_ver = state["pending_reload_version"]
+                retries = state.get("pending_reload_retries", 0)
+                log.info(
+                    f"Retrying pending reload v{pending_ver} "
+                    f"(attempt {retries + 1}/{RELOAD_MAX_RETRIES})"
+                )
+                retry_ok = _trigger_reload()
+                time.sleep(8)
+
+                # Verify /health confirms the version, not just that the request succeeded
+                retry_verified = False
+                if retry_ok:
+                    retry_verified = _verify_deployed_version(pending_ver, wait_seconds=30)
+
+                if retry_ok and retry_verified:
+                    log.info(f"Pending reload v{pending_ver} confirmed on retry {retries + 1}")
+                    # Now safe to advance watermark and record version as live
+                    current_corrections = _count_corrections_total()
+                    state["last_correction_count"] = current_corrections
+                    state["last_retrain_version"] = pending_ver
+                    state["pending_reload_version"] = None
+                    state["pending_reload_retries"] = 0
+                    _save_state(state)
+                    _log_event_to_mlflow("reload_retry_succeeded", {
+                        "version": pending_ver,
+                        "attempts": str(retries + 1),
+                        "verified": "true",
+                    })
+                else:
+                    retries += 1
+                    state["pending_reload_retries"] = retries
+                    if retries >= RELOAD_MAX_RETRIES:
+                        log.error(
+                            f"Pending reload v{pending_ver} failed after "
+                            f"{RELOAD_MAX_RETRIES} attempts — giving up. "
+                            "Advancing watermark to prevent infinite correction loop."
+                        )
+                        # Give up — advance watermark so corrections aren't retried forever
+                        current_corrections = _count_corrections_total()
+                        state["last_correction_count"] = current_corrections
+                        state["pending_reload_version"] = None
+                        state["pending_reload_retries"] = 0
+                        _log_event_to_mlflow("reload_permanently_failed", {
+                            "version": pending_ver,
+                            "attempts": str(retries),
+                        })
+                    else:
+                        log.warning(
+                            f"Reload retry failed ({retries}/{RELOAD_MAX_RETRIES}) "
+                            f"— will retry next cycle"
+                        )
+                    _save_state(state)
+                # Don't process corrections until pending reload is resolved or given up
+                time.sleep(CHECK_INTERVAL)
+                continue
 
             # ----------------------------------------------------------------
             # 2. Check retrain triggers
@@ -352,9 +466,23 @@ def run():
             trigger_reason = "weekly_schedule" if weekly else f"corrections={new_corrections}"
             log.info(f"RETRAIN TRIGGERED: {trigger_reason}")
 
-            # Record current version before retrain
+            # #6: check backoff — don't hammer if previous attempt recently failed
+            consecutive_failures = state.get("consecutive_failures", 0)
+            last_failed_at = state.get("last_failed_at")
+            if consecutive_failures > 0 and last_failed_at:
+                backoff_until = datetime.fromisoformat(last_failed_at) + timedelta(
+                    minutes=FAILURE_BACKOFF_MINUTES * consecutive_failures
+                )
+                if datetime.now(timezone.utc) < backoff_until:
+                    log.warning(
+                        f"Skipping retrain — in backoff after {consecutive_failures} "
+                        f"consecutive failure(s). Retry after {backoff_until.isoformat()}"
+                    )
+                    time.sleep(CHECK_INTERVAL)
+                    continue
+
+            # #9: record current version BEFORE retrain for explicit rollback target
             version_before = _get_latest_version()
-            # Record current correction rate (of the model about to be replaced)
             prev_rate = _get_correction_rate_for_version(
                 str(version_before)
             ) if version_before else None
@@ -365,16 +493,23 @@ def run():
             retrain_ok = _run_retrain()
 
             if not retrain_ok:
-                log.error("Retrain failed — updating correction count to avoid infinite re-trigger")
+                # #6: failed retrain — do NOT advance watermark (corrections
+                # are still unprocessed and should trigger retry after backoff).
+                consecutive_failures = state.get("consecutive_failures", 0) + 1
+                state["consecutive_failures"] = consecutive_failures
+                state["last_failed_at"] = now_iso
+                state["last_retrain_at"] = now_iso  # prevent weekly re-trigger
+                _save_state(state)
+                log.error(
+                    f"Retrain failed (consecutive_failures={consecutive_failures}). "
+                    f"Corrections preserved for retry after "
+                    f"{FAILURE_BACKOFF_MINUTES * consecutive_failures}min backoff."
+                )
                 _log_event_to_mlflow("retrain_failed", {
                     "trigger": trigger_reason,
                     "version_before": str(version_before),
+                    "consecutive_failures": str(consecutive_failures),
                 })
-                # Still advance the correction count and record attempt time
-                # so we don't re-trigger on the same corrections next cycle.
-                state["last_correction_count"] = current_corrections
-                state["last_retrain_at"] = now_iso
-                _save_state(state)
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -393,10 +528,10 @@ def run():
                     "version": str(version_before),
                     "new_corrections": str(new_corrections),
                 })
-                # Record that a retrain attempt happened (even with no improvement)
-                # so the weekly trigger doesn't fire again next check cycle.
                 state["last_correction_count"] = current_corrections
                 state["last_retrain_at"] = now_iso
+                state["consecutive_failures"] = 0  # reset — retrain ran OK, just no improvement
+                state["last_failed_at"] = None
                 _save_state(state)
                 time.sleep(CHECK_INTERVAL)
                 continue
@@ -406,8 +541,39 @@ def run():
             # ----------------------------------------------------------------
             # 5. Hot-reload serving container
             # ----------------------------------------------------------------
-            _trigger_reload()
-            time.sleep(5)   # give the reload thread a moment
+            # #3: trigger reload and verify serving actually loaded the new version
+            reload_ok = _trigger_reload()
+
+            # Wait for the background reload thread, then confirm via /health
+            # that model_version == version_after before recording it as live.
+            verified = False
+            if reload_ok:
+                verified = _verify_deployed_version(str(version_after), wait_seconds=30)
+
+            if not reload_ok or not verified:
+                log.error(
+                    f"Reload {'request failed' if not reload_ok else 'succeeded but version not confirmed'} "
+                    f"for v{version_after}. "
+                    "Corrections preserved — will retry next cycle."
+                )
+                # P2 fix: do NOT advance last_correction_count.
+                # Store pending version so retry loop handles it next cycle.
+                state["last_retrain_at"] = now_iso
+                state["consecutive_failures"] = 0
+                state["last_failed_at"] = None
+                state["pending_reload_version"] = str(version_after)
+                state["pending_reload_retries"] = 0
+                state["version_before_last_retrain"] = str(version_before) if version_before else None
+                _save_state(state)
+                _log_event_to_mlflow("reload_failed", {
+                    "trigger": trigger_reason,
+                    "version_before": str(version_before),
+                    "version_after": str(version_after),
+                    "reload_request_ok": str(reload_ok),
+                    "version_verified": str(verified),
+                })
+                time.sleep(CHECK_INTERVAL)
+                continue
 
             # ----------------------------------------------------------------
             # 6. Update state + schedule rollback check
@@ -421,6 +587,10 @@ def run():
             state["last_correction_count"] = current_corrections
             state["prev_correction_rate"] = prev_rate
             state["rollback_check_due"] = rollback_due
+            state["consecutive_failures"] = 0
+            state["last_failed_at"] = None
+            # #9: store explicit pre-retrain version for rollback (not version-1 heuristic)
+            state["version_before_last_retrain"] = str(version_before) if version_before else None
             _save_state(state)
 
             _log_event_to_mlflow("retrain_success", {
@@ -433,7 +603,7 @@ def run():
             })
 
             log.info(
-                f"Done. v{version_after} loaded. "
+                f"Done. v{version_after} loaded and confirmed. "
                 f"Rollback check scheduled at {rollback_due}"
             )
 
