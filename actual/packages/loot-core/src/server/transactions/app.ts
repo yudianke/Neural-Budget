@@ -95,16 +95,6 @@ async function moveTransaction({
   accountId,
   targetId,
 }: {
-  entries: Parameters<typeof logM1FeedbackBatch>[0];
-}) {
-  return logM1FeedbackBatch(entries);
-}
-
-async function moveTransaction({
-  id,
-  accountId,
-  targetId,
-}: {
   id: string;
   accountId: string;
   targetId: string | null;
