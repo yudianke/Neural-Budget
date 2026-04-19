@@ -80,7 +80,7 @@ services:
       AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
     volumes:
       - feedback_data:/data/feedback
-      - ${MONEYDATA_PATH:-/tmp/moneydata_placeholder}:/data/moneydata.csv:ro
+      - ${MONEYDATA_PATH:-./training/m1/data/moneydata.csv}:/data/moneydata.csv:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - ml-net
@@ -132,7 +132,9 @@ services:
       M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
       M2_DAEMON_STATE_PATH: "/data/feedback/m2_daemon_state.json"
       M2_CONFIG: "/app/training/m2/config_m2.yaml"
-      M2_BOOTSTRAP_DATA_PATH: "/data/anomaly_train.csv"
+      # M2_BOOTSTRAP_DATA_PATH intentionally omitted — train_m2.py reads
+      # train_path from config_m2.yaml (swift:// on Chameleon) when this
+      # env var is not set. Do not override here with an unmounted path.
       CHECK_INTERVAL_SECONDS: "300"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
