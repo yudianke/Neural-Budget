@@ -11,7 +11,7 @@ An optional ML layer on top of [ActualBudget](https://github.com/actualbudget/ac
 | Feature | Model | Status |
 |---|---|---|
 | M1 — Transaction Auto-Categorization | TF-IDF + XGBoost | Production |
-| M2 — Anomaly Detection | Isolation Forest + Rules | Training only |
+| M2 — Anomaly Detection | Isolation Forest + Rules | Production |
 | M3 — Budget Forecasting | HistGradientBoosting | Production |
 
 ---
@@ -83,6 +83,101 @@ docker run -p 8001:8001 \
 ### MLflow
 Experiment: `m1-categorization` — tracks macro-F1, per-category F1, training time, data hash, git commit.
 Registry: `m1-ray-categorization`
+
+---
+
+## M2 — Anomaly Detection
+
+### What it does
+Scores every imported transaction asynchronously (< 5s) and displays a warning badge if the transaction is anomalous. Users can dismiss false positives. Dismissals feed back into a weekly retraining cycle that adjusts the model's sensitivity automatically.
+
+Cold-start guard: inactive until the user has ≥ 50 transactions.
+
+### Model
+- **ML layer:** IsolationForest exported to ONNX (6 features: `abs_amount`, `repeat_count`, `is_recurring_candidate`, `user_txn_index`, `user_mean_abs_amount_prior`, `user_std_abs_amount_prior`)
+- **Rule layer** (computed in loot-core): `duplicate_within_24h`, `subscription_jump`
+- **Badge types:** `duplicate` · `price_jump` · `spike`
+- **Output:** `anomaly_score`, `is_anomaly`, `badge_type`, `rule_flags`, `model_version`
+
+### Training
+
+```bash
+# Docker (Chameleon)
+docker build -f training/m2/Dockerfile.m2 -t m2-training .
+docker run --rm \
+  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e AWS_ACCESS_KEY_ID=<key> \
+  -e AWS_SECRET_ACCESS_KEY=<secret> \
+  m2-training
+```
+
+MLflow experiment: `m2-anomaly` — tracks contamination, dismiss_rate, training time, git commit.
+Registry: `m2-anomaly`
+
+### Retraining
+
+The `m2-retrain-daemon` container drives the full retrain + rollback cycle automatically (polls every 5 minutes).
+
+**Three retrain triggers:**
+1. ≥ 30 new dismissals since last retrain
+2. Weekly (Sunday), if last retrain was ≥ 6 days ago
+3. Urgent: dismiss rate > 50%
+
+**Contamination adjustment:** if dismiss rate > 30%, `contamination` decreases by 0.01 (floor 0.01), reducing false-positive sensitivity before retraining.
+
+**Rollback:** 24h after a retrain, if the new model's dismiss rate > previous × 1.20, daemon calls `/admin/reload?version=<old>` to revert automatically.
+
+**Manual / forced retrain (for testing):**
+```bash
+# Trigger retrain immediately
+docker exec m2-retrain-daemon python3 training/m2/retrain_daemon.py --force-retrain
+
+# Or run the retrain script directly
+docker exec m2-retrain-daemon bash /app/training/m2/run_m2_retrain.sh
+```
+
+### Serving
+
+```bash
+cd serving/m2_onnx_multiworker
+docker build -t m2-serving .
+docker run -p 8003:8003 \
+  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e M2_FEEDBACK_LOG_PATH=/data/feedback/m2_feedback.jsonl \
+  -e PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_m2 \
+  m2-serving
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Service health + loaded model version |
+| POST | `/predict/anomaly` | Score a transaction for anomalies |
+| POST | `/feedback` | Log a dismiss or confirm signal |
+| GET | `/metrics/feedback` | Aggregate dismiss stats (used by daemon) |
+| GET | `/metrics/feedback/since/{version}` | Version-filtered stats for rollback check |
+| POST | `/admin/reload` | Hot-reload ONNX model from disk |
+| GET | `/metrics` | Prometheus metrics (multiprocess-safe) |
+
+**Rollback a specific version:**
+```bash
+curl -X POST http://localhost:8003/admin/reload?version=1
+```
+
+### Latency target
+< 5s asynchronous — M2 is fire-and-forget, never blocks the transaction save path.
+
+### UI Integration
+- `AnomalyBadge` renders inside the payee cell of every transaction row
+- Badge label is localized: `Possible duplicate` · `Subscription price jump` · `Unusual amount`
+- Dismiss `×` button writes `anomaly_dismissed=1` to SQLite and sends a fire-and-forget `POST /feedback` to the M2 serving layer
+- Badge auto-hides after dismiss without a page reload
+
+### MLflow
+- Experiment: `m2-anomaly` — tracks contamination, dismiss_rate, training data hash
+- Registry: `m2-anomaly` — currently on v1
+- Daemon monitor logs: retrain, rollback, and no-improvement events
 
 ---
 
@@ -207,8 +302,11 @@ export AWS_SECRET_ACCESS_KEY=<chameleon-object-store-secret>
 Services:
 | Container | Port | Description |
 |---|---|---|
+| `actual-development` | 3001 | ActualBudget UI (React + Node.js) |
 | `m1-serving` | 8001 | M1 categorization inference |
 | `retrain-daemon` | — | M1 weekly retrain + rollback |
+| `m2-serving` | 8003 | M2 anomaly detection inference |
+| `m2-retrain-daemon` | — | M2 feedback-driven retrain + rollback |
 | `m3-serving` | 8002 | M3 forecast inference |
 | `m3-monitor-daemon` | — | M3 monthly retrain + rollback |
 | `prometheus` | 9090 | Metrics scraping |
@@ -231,6 +329,7 @@ Neural-Budget/
 │   ├── m1_onnx/               # M1 ONNX optimized
 │   ├── m1_onnx_multiworker/   # M1 Gunicorn multi-worker
 │   ├── m1_rayserve_bonus/     # M1 Ray Serve
+│   ├── m2_onnx_multiworker/   # M2 Gunicorn multi-worker ONNX + feedback loop
 │   └── m3/                    # M3 forecast serving
 ├── training/
 │   ├── m1/                    # M1 XGBoost training
