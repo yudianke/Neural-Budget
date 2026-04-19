@@ -27,6 +27,11 @@ Environment variables (all have defaults):
     M3_RETRAIN_SCRIPT       Path to run_m3_retrain.sh
     M3_ACTUALS_URL          URL for fetching actuals (passed to /metrics/forecast-accuracy)
     CHECK_INTERVAL_SECONDS  Main loop poll interval (default: 3600 = 1 hour)
+    M3_FORCE_RETRAIN        Set to "1" to bypass the day-of-month gate and retrain immediately
+                            on the next poll. Useful for testing and manual triggers.
+                            Resets automatically after one retrain fires.
+    M3_FORCE_EVAL           Set to "1" to bypass the day-16 gate and run accuracy evaluation
+                            immediately. Requires last_retrain_year_month == current month in state.
 """
 
 import json
@@ -60,6 +65,10 @@ ROLLBACK_MAE_DELTA = float(os.environ.get("M3_ROLLBACK_MAE_DELTA", "1.20"))  # 2
 
 # How long to wait for /health to show the new version after a reload call.
 RELOAD_VERIFY_TIMEOUT = int(os.environ.get("M3_RELOAD_VERIFY_TIMEOUT", "90"))
+
+# Testing / manual trigger flags — bypass the day-of-month schedule gates.
+FORCE_RETRAIN = os.environ.get("M3_FORCE_RETRAIN", "").strip().lower() in ("1", "true", "yes")
+FORCE_EVAL    = os.environ.get("M3_FORCE_EVAL", "").strip().lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -440,8 +449,12 @@ def main() -> None:
     log.info("MLflow URI:      %s", MLFLOW_URI)
     log.info("State path:      %s", STATE_PATH)
     log.info("Retrain script:  %s", RETRAIN_SCRIPT)
-    log.info("Actuals URL:     %s", ACTUALS_URL or "(not configured)")
+    log.info("Actuals URL:     %s", ACTUALS_URL or "(not configured — rollback eval will be skipped)")
     log.info("Rollback delta:  %.0f%%", (ROLLBACK_MAE_DELTA - 1) * 100)
+    if FORCE_RETRAIN:
+        log.warning("M3_FORCE_RETRAIN=1 — day-of-month gate bypassed, retrain fires on next poll")
+    if FORCE_EVAL:
+        log.warning("M3_FORCE_EVAL=1 — day-16 gate bypassed, accuracy eval fires on next poll")
 
     mlflow.set_tracking_uri(MLFLOW_URI)
 
@@ -452,25 +465,32 @@ def main() -> None:
             now_ym = now.strftime("%Y-%m")
 
             # ----------------------------------------------------------------
-            # Phase 1 guard: trigger on day 2 of the month if not yet done
+            # Phase 1 guard: trigger on day 2 of the month if not yet done.
+            # M3_FORCE_RETRAIN=1 bypasses the day check for testing.
             # ----------------------------------------------------------------
+            retrain_day_ok = FORCE_RETRAIN or now.day >= 2
             if (
-                now.day >= 2
+                retrain_day_ok
                 and state.get("last_retrain_year_month") != now_ym
-                and state.get("consecutive_failures", 0) < 3  # stop after 3 consecutive failures
+                and state.get("consecutive_failures", 0) < 3
             ):
+                if FORCE_RETRAIN:
+                    log.info("FORCE_RETRAIN active — triggering retrain immediately")
                 state = _run_retrain(state)
                 _save_state(state)
 
             # ----------------------------------------------------------------
-            # Phase 2 guard: evaluate on day 16 of the month if not yet done
+            # Phase 2 guard: evaluate on day 16 of the month if not yet done.
+            # M3_FORCE_EVAL=1 bypasses the day check for testing.
             # ----------------------------------------------------------------
+            eval_day_ok = FORCE_EVAL or now.day >= 16
             if (
-                now.day >= 16
+                eval_day_ok
                 and state.get("last_eval_year_month") != now_ym
-                # Only evaluate if we have a retrain this month to evaluate
                 and state.get("last_retrain_year_month") == now_ym
             ):
+                if FORCE_EVAL:
+                    log.info("FORCE_EVAL active — triggering accuracy eval immediately")
                 state = _run_accuracy_eval(state)
                 _save_state(state)
 
