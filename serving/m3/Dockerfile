@@ -8,6 +8,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY m3_inference_service.py .
+COPY forecast_log.py .
 
 EXPOSE 8002
 

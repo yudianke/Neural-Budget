@@ -1,0 +1,20 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ git bash curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install M3 daemon dependencies
+COPY m3/requirements_m3.txt .
+RUN pip install --no-cache-dir -r requirements_m3.txt
+
+# Copy M3 training code (daemon + retrain script + train script)
+COPY m3/ /app/training/m3/
+
+RUN chmod +x /app/training/m3/run_m3_retrain.sh
+
+WORKDIR /app/training/m3
+
+CMD ["python3", "m3_monitor_daemon.py"]

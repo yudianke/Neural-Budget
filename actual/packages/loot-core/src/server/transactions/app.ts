@@ -203,6 +203,8 @@ type ForecastFeatureRow = {
   lag_1: number;
   lag_2: number;
   lag_3: number;
+  lag_4: number;
+  lag_5: number;
   lag_6: number;
   rolling_mean_3: number;
   rolling_std_3: number;
@@ -377,6 +379,8 @@ async function getCategoryPredictions() {
     //   lag_1         = prior[-1]  → lag(0) = history[-1]  (same as monthly_spend)
     //   lag_2         = prior[-2]  → lag(1) = history[-2]
     //   lag_3         = prior[-3]  → lag(2) = history[-3]
+    //   lag_4         = prior[-4]  → lag(3) = history[-4]
+    //   lag_5         = prior[-5]  → lag(4) = history[-5]
     //   lag_6         = prior[-6]  → lag(5) = history[-6]
     featureRows.push({
       project_category,
@@ -384,6 +388,8 @@ async function getCategoryPredictions() {
       lag_1: lag(0),
       lag_2: lag(1),
       lag_3: lag(2),
+      lag_4: lag(3),
+      lag_5: lag(4),
       lag_6: lag(5),
       rolling_mean_3: mean(prior3),
       rolling_std_3: std(prior3),

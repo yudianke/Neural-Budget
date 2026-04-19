@@ -8,3 +8,6 @@ prometheus-client
 psycopg2-binary
 sqlalchemy
 scikit-learn==1.6.1
+joblib
+requests>=2.32.0
+boto3

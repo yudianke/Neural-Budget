@@ -1,7 +1,8 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 
 import {Trans} from 'react-i18next';
 
+import {Button} from '@actual-app/components/button';
 import {Text} from '@actual-app/components/text';
 import {View} from '@actual-app/components/view';
 import {send} from '@actual-app/core/platform/client/connection';
@@ -37,19 +38,24 @@ export function ForecastCard({
 }: ForecastCardProps) {
   const [data, setData] = useState<ForecastResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await send('forecast-get-category-predictions');
+      setData(json);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function run() {
-      try {
-        setError(null);
-        const json = await send('forecast-get-category-predictions');
-        setData(json);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    }
-    void run();
-  }, []);
+    void load();
+  }, [load]);
 
   const sortedForecasts = useMemo(() => {
     if (!data?.forecasts) return [];
@@ -82,16 +88,55 @@ export function ForecastCard({
       }}
     >
       <View style={{flex: 1, padding: 10, gap: 8}}>
-        <Text style={{fontSize: 18, fontWeight: 600}}>
-          <Trans>Personalized Forecast</Trans>
-        </Text>
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{fontSize: 18, fontWeight: 600}}>
+            <Trans>Personalized Forecast</Trans>
+          </Text>
+
+          <Button
+            variant="bare"
+            onPress={() => void load()}
+            style={{padding: '2px 6px', fontSize: 12, opacity: 0.7}}
+          >
+            {loading ? <Trans>Loading...</Trans> : <Trans>Refresh</Trans>}
+          </Button>
+        </View>
 
         <Text style={{fontSize: 14, opacity: 0.7}}>
           <Trans>Forecasted spend vs current budget by category</Trans>
         </Text>
 
         {error ? (
-          <Text>{error}</Text>
+          <Text style={{color: '#ff7b7b'}}>{error}</Text>
+        ) : loading && !data ? (
+          // Skeleton placeholder while first load is in flight
+          <View style={{marginTop: 8, gap: 10}}>
+            {[1, 2, 3, 4].map(i => (
+              <View key={i} style={{gap: 4}}>
+                <View
+                  style={{
+                    height: 14,
+                    borderRadius: 4,
+                    backgroundColor: 'rgba(255,255,255,0.08)',
+                    width: `${50 + i * 10}%`,
+                  }}
+                />
+                <View
+                  style={{
+                    height: 12,
+                    borderRadius: 999,
+                    backgroundColor: 'rgba(255,255,255,0.05)',
+                  }}
+                />
+              </View>
+            ))}
+          </View>
         ) : data ? (
           <View style={{marginTop: 8, gap: 10}}>
             {topCategory && (
@@ -122,7 +167,14 @@ export function ForecastCard({
                       {item.category}
                     </Text>
 
-                    <View style={{flexDirection: 'row', gap: 8}}>
+                    <View style={{flexDirection: 'row', gap: 8, alignItems: 'center'}}>
+                      {/* Last month actual — shown in muted text when available */}
+                      {item.last_month != null && item.last_month > 0 && (
+                        <Text style={{opacity: 0.5, fontSize: 12}}>
+                          <Trans>last</Trans>{' '}${item.last_month.toFixed(0)}
+                        </Text>
+                      )}
+
                       <Text>
                         {item.forecast != null
                           ? `$${item.forecast.toFixed(0)}`
@@ -171,11 +223,7 @@ export function ForecastCard({
               <Trans>Model:</Trans> {data.model_name}
             </Text>
           </View>
-        ) : (
-          <Text>
-            <Trans>Loading...</Trans>
-          </Text>
-        )}
+        ) : null}
       </View>
     </ReportCard>
   );
