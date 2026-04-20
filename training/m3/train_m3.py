@@ -472,10 +472,12 @@ def main():
 
         if not absolute_gate_passed:
             print(f"GATE FAILED: mae={overall_mae:.4f} > threshold={MAE_GATE:.4f} — not registering")
+            mlflow.end_run(status="FINISHED")
             sys.exit(0)
 
         if not improvement_gate_passed:
             print(f"GATE FAILED: {register_reason} — not registering")
+            mlflow.end_run(status="FINISHED")
             sys.exit(0)
 
         if not cat_gate_passed:
@@ -483,6 +485,7 @@ def main():
                 f"GATE FAILED: {len(regressed_cats)} category(ies) regressed "
                 f">{CATEGORY_REGRESSION_MAX * 100:.0f}% vs previous version — not registering"
             )
+            mlflow.end_run(status="FINISHED")
             sys.exit(0)
 
         # ----------------------------------------------------------------
