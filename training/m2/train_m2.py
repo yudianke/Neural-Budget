@@ -80,7 +80,7 @@ def main():
     config = load_config(args.config)
 
     tracking_uri = setup_mlflow(config)
-    train_path = os.environ.get("M2_TRAIN_PATH", config["train_path"])
+    train_path = os.environ.get("M2_TRAIN_PATH") or config["train_path"]
     eval_path = os.environ.get("M2_EVAL_PATH", config["eval_path"])
     production_path = config.get("production_path") if args.mode == "retrain" else None
     gate_recall = float(os.environ.get("M2_GATE_RECALL", config.get("quality_gate_recall", 0.70)))
