@@ -52,7 +52,7 @@ M2_SERVING_URL    = os.environ.get("M2_SERVING_URL", "http://m2-serving:8003")
 FEEDBACK_PATH     = Path(os.environ.get("M2_FEEDBACK_LOG_PATH", "/data/feedback/m2_feedback.jsonl"))
 STATE_PATH        = Path(os.environ.get("M2_DAEMON_STATE_PATH", "/data/feedback/m2_daemon_state.json"))
 CONFIG_PATH       = os.environ.get("M2_CONFIG", "/app/training/m2/config_m2.yaml")
-BOOTSTRAP_PATH    = os.environ.get("M2_BOOTSTRAP_DATA_PATH", "/data/anomaly_train.csv")
+BOOTSTRAP_PATH    = os.environ.get("M2_BOOTSTRAP_DATA_PATH", "")  # empty = use config_m2.yaml train_path (swift://)
 CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 MODEL_NAME        = "m2-anomaly"
 
@@ -220,7 +220,10 @@ def _run_retrain(contamination: float) -> bool:
     env["M2_FEEDBACK_INPUT"] = str(FEEDBACK_PATH)
     env["M2_FEEDBACK_DATASET"] = str(FEEDBACK_PATH.parent / "m2_feedback_dataset.csv")
     env["M2_CONFIG"] = CONFIG_PATH
-    env["M2_TRAIN_PATH"] = BOOTSTRAP_PATH
+    # Only set M2_TRAIN_PATH if explicitly provided — otherwise train_m2.py
+    # reads train_path from config_m2.yaml (swift:// on Chameleon S3)
+    if BOOTSTRAP_PATH:
+        env["M2_TRAIN_PATH"] = BOOTSTRAP_PATH
     env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
     # Override contamination for this retrain
     env["M2_CONTAMINATION"] = str(contamination)
