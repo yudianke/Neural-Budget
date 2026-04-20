@@ -23,3 +23,7 @@ actual/packages/sync-server/*.sqlite
 /actual/packages/desktop-client/service-worker 2
 historical_transactions.csv
 transaction-row.png
+training/m3/artifacts/
+*.joblib
+*.pkl
+*.csv
