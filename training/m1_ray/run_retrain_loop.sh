@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-INPUT_PATH="${1:-${M1_FEEDBACK_INPUT:-/tmp/m1_ray_feedback.jsonl}}"
+INPUT_PATH="${1:-${M1_FEEDBACK_INPUT:-${M1_FEEDBACK_LOG_PATH:-/data/feedback/m1_feedback.jsonl}}}"
 OUTPUT_PATH="${2:-${M1_FEEDBACK_DATASET:-/tmp/m1_ray_feedback.csv}}"
 CONFIG_PATH="${M1_RAY_CONFIG:-${SCRIPT_DIR}/config_m1_ray.yaml}"
 
