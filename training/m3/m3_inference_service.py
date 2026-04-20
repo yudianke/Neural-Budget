@@ -16,6 +16,19 @@ from db import get_conn
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("m3_service")
 
+
+LOCAL_CANDIDATE_MAE = Gauge(
+    "local_candidate_mae",
+    "Latest local candidate MAE",
+    ["user_id"],
+)
+
+GLOBAL_BASELINE_MAE = Gauge(
+    "global_baseline_mae",
+    "Global production MAE on local holdout",
+    ["user_id"],
+)
+
 REQUEST_COUNT = Counter(
     "forecast_requests_total",
     "Total number of forecast requests"
@@ -153,6 +166,27 @@ def load_feature_rows(path: str) -> pd.DataFrame:
     logger.info("Loaded latest feature rows from %s (%d rows)", path, len(df))
     return df
 
+def refresh_local_model_comparison_metrics() -> None:
+    sql = """
+    SELECT DISTINCT ON (user_id)
+        user_id,
+        local_candidate_mae,
+        global_baseline_mae
+    FROM local_model_comparisons
+    ORDER BY user_id, created_at DESC
+    """
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+
+        for user_id, local_mae, global_mae in rows:
+            LOCAL_CANDIDATE_MAE.labels(user_id=user_id).set(float(local_mae))
+            GLOBAL_BASELINE_MAE.labels(user_id=user_id).set(float(global_mae))
+    except Exception as e:
+        logger.warning("Failed to refresh local/global MAE metrics: %s", e)
 
 bundle = load_bundle(resolve_model_bundle_path())
 model = bundle["model"]
@@ -171,9 +205,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/metrics")
-def metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 @app.get("/health")
 def health():
     return {
@@ -270,6 +302,10 @@ def forecast_for_user(request: UserForecastRequest):
 
     finally:
         REQUEST_LATENCY.observe(time.time() - start)
+@app.get("/metrics")
+def metrics():
+    refresh_local_model_comparison_metrics()
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 @app.post("/forecast/features", response_model=ForecastFeaturesResponse)
 def forecast_from_features(request: ForecastFeaturesRequest):
     REQUEST_COUNT.inc()
