@@ -27,7 +27,12 @@ def load_config(path):
 
 
 def resolve_path(path, prefix="M"):
-    """Local path or swift:// URL -> local path. Caches downloads."""
+    """Local path or swift:// URL -> local path. Caches downloads.
+
+    Downloads via boto3 S3-compatible client (uses AWS_ACCESS_KEY_ID /
+    AWS_SECRET_ACCESS_KEY + MLFLOW_S3_ENDPOINT_URL from environment).
+    Falls back to swift CLI if boto3 is unavailable.
+    """
     if not path.startswith("swift://"):
         return path
     _, rest = path.split("swift://", 1)
@@ -36,10 +41,26 @@ def resolve_path(path, prefix="M"):
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if not local_path.exists():
         log(prefix, f"downloading {path}")
-        subprocess.run(
-            ["swift", "download", container, object_name, "-o", str(local_path)],
-            check=True,
-        )
+        try:
+            import boto3
+            endpoint = os.environ.get(
+                "MLFLOW_S3_ENDPOINT_URL",
+                os.environ.get("AWS_ENDPOINT_URL", "https://chi.tacc.chameleoncloud.org:7480"),
+            )
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+            )
+            s3.download_file(container, object_name, str(local_path))
+            log(prefix, f"downloaded via S3 → {local_path}")
+        except ImportError:
+            # boto3 not available — fall back to swift CLI
+            subprocess.run(
+                ["swift", "download", container, object_name, "-o", str(local_path)],
+                check=True,
+            )
     else:
         log(prefix, f"using cached {local_path}")
     return str(local_path)
