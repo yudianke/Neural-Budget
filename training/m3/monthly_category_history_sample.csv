@@ -1,0 +1,7 @@
+budget_id,category_id,category_name,year_month,monthly_spend,budgeted
+test-budget,cat-food,Food,2026-01,380.25,400.00
+test-budget,cat-food,Food,2026-02,395.10,400.00
+test-budget,cat-food,Food,2026-03,402.80,400.00
+test-budget,cat-restaurants,Restaurants,2026-01,120.40,300.00
+test-budget,cat-restaurants,Restaurants,2026-02,145.75,300.00
+test-budget,cat-restaurants,Restaurants,2026-03,138.20,300.00

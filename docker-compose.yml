@@ -1,307 +1,50 @@
-# NeuralBudget — Full Stack
-# -------------------------
-# Usage:  docker-compose up -d --build
-#
-# Starts everything with one command:
-#   ActualBudget dev UI  → http://localhost:3001
-#   M1 Categorization    → http://localhost:8001
-#   M2 Anomaly Detection → http://localhost:8003
-#   M3 Forecasting       → http://localhost:8002
-#   Prometheus           → http://localhost:9090
-#   Grafana              → http://localhost:3000  (admin / neuralbudget)
-#
-# Prerequisites:
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY exported in the shell
-#   or stored in a local .env file (not committed)
-
-volumes:
-  feedback_data:
-  m2_feedback_data:
-  m3_feedback_data:
-  m3_state_data:
-  prometheus_data:
-  grafana_data:
-
-networks:
-  ml-net:
-    driver: bridge
+version: "3.9"
 
 services:
-
-  # --------------------------------------------------------------------------
-  # M1 Categorization Serving
-  # --------------------------------------------------------------------------
-  m1-serving:
-    build:
-      context: ./serving/m1_baseline
-      dockerfile: Dockerfile
-    image: m1-serving:latest
-    container_name: m1-serving
+  postgres:
+    image: postgres:16
+    container_name: nb-postgres
+    environment:
+      POSTGRES_DB: neuralbudget
+      POSTGRES_USER: nb_user
+      POSTGRES_PASSWORD: nb_pass
     ports:
-      - "8001:8001"
-    environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M1_REGISTERED_MODEL_NAME: "m1-ray-categorization"
-      M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
+      - "5433:5432"
     volumes:
-      - feedback_data:/data/feedback
-    networks:
-      - ml-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      - postgres_data:/var/lib/postgresql/data
+      - ./training/m3/schemas.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
-  # --------------------------------------------------------------------------
-  # Retrain Daemon (M1)
-  # --------------------------------------------------------------------------
-  retrain-daemon:
-    build:
-      context: ./training
-      dockerfile: m1_ray/Dockerfile
-    image: retrain-daemon:latest
-    container_name: retrain-daemon
-    shm_size: "2gb"
-    environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M1_SERVING_URL: "http://m1-serving:8001"
-      M1_SERVING_CONTAINER: "m1-serving"
-      M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
-      M1_DAEMON_STATE_PATH: "/data/feedback/daemon_state.json"
-      M1_RAY_CONFIG: "/app/training/m1_ray/config_m1_ray.yaml"
-      M1_BOOTSTRAP_DATA_PATH: "/data/moneydata.csv"
-      CHECK_INTERVAL_SECONDS: "300"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-    volumes:
-      - feedback_data:/data/feedback
-      - ${MONEYDATA_PATH:-./training/m1/data/moneydata.csv}:/data/moneydata.csv:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - ml-net
-    depends_on:
-      m1-serving:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # --------------------------------------------------------------------------
-  # M2 Anomaly Detection Serving
-  # --------------------------------------------------------------------------
-  m2-serving:
-    build:
-      context: ./serving/m2_onnx_multiworker
-      dockerfile: Dockerfile
-    image: m2-serving:latest
-    container_name: m2-serving
-    ports:
-      - "8003:8003"
-    environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M2_REGISTERED_MODEL_NAME: "m2-anomaly"
-      M2_CONTAMINATION: "${M2_CONTAMINATION:-0.05}"
-      M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
-      PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc_m2"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-    volumes:
-      - m2_feedback_data:/data/feedback
-    networks:
-      - ml-net
-    restart: unless-stopped
-    healthcheck:
-      # Health check allows degraded status — fallback model still serves predictions
-      test: ["CMD", "python3", "-c", "import urllib.request, json; r=json.loads(urllib.request.urlopen('http://localhost:8003/health', timeout=3).read()); assert r['status'] in ('ok','degraded')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  # --------------------------------------------------------------------------
-  # M2 Retrain Daemon
-  # --------------------------------------------------------------------------
-  m2-retrain-daemon:
+  forecast-api:
     build:
       context: .
-      dockerfile: training/m2/Dockerfile.daemon
-    image: m2-retrain-daemon:latest
-    container_name: m2-retrain-daemon
+      dockerfile: training/m3/Dockerfile
+    container_name: nb-forecast-api
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M2_SERVING_URL: "http://m2-serving:8003"
-      M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
-      M2_DAEMON_STATE_PATH: "/data/feedback/m2_daemon_state.json"
-      M2_CONFIG: "/app/training/m2/config_m2.yaml"
-      # M2_BOOTSTRAP_DATA_PATH intentionally omitted — train_m2.py reads
-      # train_path from config_m2.yaml (swift:// on Chameleon) when this
-      # env var is not set. Do not override here with an unmounted path.
-      CHECK_INTERVAL_SECONDS: "300"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      GIT_PYTHON_REFRESH: "quiet"
-    volumes:
-      - m2_feedback_data:/data/feedback
-    networks:
-      - ml-net
-    depends_on:
-      m2-serving:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # --------------------------------------------------------------------------
-  # M3 Forecast Serving
-  # --------------------------------------------------------------------------
-  m3-serving:
-    build:
-      context: ./serving/m3
-      dockerfile: Dockerfile
-    image: m3-serving:latest
-    container_name: m3-serving
+      DATABASE_URL: postgresql://nb_user:nb_pass@postgres:5432/neuralbudget
+      M3_V2_BUNDLE_PATH: /app/m3_v2_bundle.joblib
+      M3_V2_FEATURES_PATH: /app/m3_v2_latest_features.csv
     ports:
       - "8002:8002"
-    environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M3_REGISTERED_MODEL: "m3-forecast"
-      M3_FORECAST_LOG_PATH: "/data/m3_feedback/m3_forecasts.jsonl"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-    volumes:
-      - m3_feedback_data:/data/m3_feedback
-    networks:
-      - ml-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=3)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # --------------------------------------------------------------------------
-  # M3 Monitor Daemon (monthly retrain trigger + accuracy-based rollback)
-  # --------------------------------------------------------------------------
-  m3-monitor-daemon:
-    build:
-      context: .
-      dockerfile: training/m3/Dockerfile.daemon
-    image: m3-monitor-daemon:latest
-    container_name: m3-monitor-daemon
-    environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.27.211:8000}"
-      M3_SERVING_URL: "http://m3-serving:8002"
-      M3_STATE_PATH: "/data/m3_state/monitor_state.json"
-      M3_RETRAIN_SCRIPT: "/app/training/m3/run_m3_retrain.sh"
-      M3_STATE_DIR: "/data/m3_state"
-      M3_FORECAST_LOG_PATH: "/data/m3_feedback/m3_forecasts.jsonl"
-      M3_ROLLBACK_MAE_DELTA: "1.20"
-      CHECK_INTERVAL_SECONDS: "${CHECK_INTERVAL_SECONDS:-3600}"
-      M3_FORCE_RETRAIN: "${M3_FORCE_RETRAIN:-}"
-      M3_FORCE_EVAL: "${M3_FORCE_EVAL:-}"
-      # Actuals endpoint — Vite dev server middleware exposes real monthly spend
-      # per category from budget SQLite files. M3 daemon calls this to compute
-      # production MAE and trigger automatic rollback when quality degrades.
-      M3_ACTUALS_URL: "${M3_ACTUALS_URL:-http://actual-development:3001/api/ml/actuals?months=12}"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      MLFLOW_S3_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-      AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
-    volumes:
-      - m3_state_data:/data/m3_state
-      - m3_feedback_data:/data/m3_feedback
-    networks:
-      - ml-net
     depends_on:
-      m3-serving:
-        condition: service_healthy
-    restart: unless-stopped
+      - postgres
 
-  # --------------------------------------------------------------------------
-  # Prometheus
-  # --------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v2.51.0
-    container_name: prometheus
+    image: prom/prometheus:latest
+    container_name: nb-prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
-      - "--web.enable-lifecycle"
-    networks:
-      - ml-net
-    restart: unless-stopped
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - forecast-api
 
-  # --------------------------------------------------------------------------
-  # Grafana
-  # --------------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:10.4.0
-    container_name: grafana
+    image: grafana/grafana:latest
+    container_name: nb-grafana
     ports:
       - "3000:3000"
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_AUTH_DISABLE_LOGIN_FORM: "false"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-neuralbudget}"
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3000}"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    networks:
-      - ml-net
     depends_on:
       - prometheus
-    restart: unless-stopped
 
-  # --------------------------------------------------------------------------
-  # ActualBudget — dev UI
-  # ML service URLs point to container names on ml-net (not host.docker.internal)
-  # --------------------------------------------------------------------------
-  actual-development:
-    build:
-      context: ./actual
-      dockerfile: Dockerfile
-    image: actual-development
-    container_name: actual-development
-    environment:
-      - HTTPS
-      - M1_SERVICE_URL=http://m1-serving:8001
-      - M2_SERVICE_URL=http://m2-serving:8003
-      - M3_SERVICE_URL=http://m3-serving:8002
-    ports:
-      - "3001:3001"
-    volumes:
-      - ./actual:/app
-      - /app/node_modules
-      - /app/packages/loot-core/node_modules
-      - /app/packages/desktop-client/node_modules
-      - /app/packages/component-library/node_modules
-      - /app/packages/crdt/node_modules
-      - /app/packages/sync-server/node_modules
-      - /app/packages/api/node_modules
-      - /app/packages/desktop-electron/node_modules
-      - /app/packages/plugins-service/node_modules
-    networks:
-      - ml-net
-    depends_on:
-      - m1-serving
-      - m2-serving
-      - m3-serving
-    restart: unless-stopped
+volumes:
+  postgres_data:

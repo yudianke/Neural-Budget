@@ -62,3 +62,27 @@ CREATE TABLE IF NOT EXISTS retraining_runs (
     promoted BOOLEAN DEFAULT FALSE,
     error_message TEXT
 );
+
+CREATE TABLE IF NOT EXISTS local_user_transactions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    category_id TEXT,
+    category_name TEXT,
+    amount NUMERIC NOT NULL,
+    payee TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, transaction_id)
+);
+
+CREATE TABLE IF NOT EXISTS local_monthly_category_history (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    category_id TEXT,
+    category_name TEXT,
+    year_month TEXT NOT NULL,
+    monthly_spend NUMERIC NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, category_id, year_month)
+);

@@ -1,505 +1,177 @@
-"""
-M3 Forecast Training (HistGradientBoostingRegressor)
-
-Usage:
-    python train_m3.py
-
-Environment variables:
-    MLFLOW_TRACKING_URI       MLflow server URL (default: http://129.114.27.211:8000)
-    M3_GATE_MAE               MAE threshold for absolute quality gate (default: 150.0)
-    M3_CATEGORY_REGRESSION_MAX  Max allowed per-category MAE regression vs prev version (default: 0.30)
-    M3_DATA_BUCKET            S3 bucket for training data (default: neural-budget-data-proj16)
-    M3_DATA_PREFIX            S3 prefix for forecasting CSVs (default: processed/batch_datasets)
-    AWS_ACCESS_KEY_ID         Chameleon object storage key
-    AWS_SECRET_ACCESS_KEY     Chameleon object storage secret
-    MLFLOW_S3_ENDPOINT_URL    S3 endpoint (default: https://chi.tacc.chameleoncloud.org:7480)
-
-Data source priority:
-    1. S3 bucket (if AWS credentials are set)
-    2. Local filesystem (fallback for development)
-
-Outputs:
-    - MLflow run with metrics, params, artifacts
-    - Registers new model version in MLflow registry (m3-forecast) if quality gate passes
-    - No local file artifacts — serving loads from MLflow
-"""
-import hashlib
-import io
+import argparse
 import os
-import subprocess
+import platform
 import sys
-import time
 import tempfile
+import time
 from pathlib import Path
 
-import boto3
-import joblib
 import mlflow
 import numpy as np
 import pandas as pd
 from mlflow.tracking import MlflowClient
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.metrics import mean_absolute_error
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = BASE_DIR.parent.parent
-
-MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
-MODEL_NAME       = "m3-forecast"
-EXPERIMENT_NAME  = "m3-forecast"
-MAE_GATE         = float(os.environ.get("M3_GATE_MAE", "150.0"))
-CATEGORY_REGRESSION_MAX = float(os.environ.get("M3_CATEGORY_REGRESSION_MAX", "0.30"))
-S3_BUCKET        = os.environ.get("M3_DATA_BUCKET", "neural-budget-data-proj16")
-S3_PREFIX        = os.environ.get("M3_DATA_PREFIX", "processed/batch_datasets")
-S3_ENDPOINT      = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "https://chi.tacc.chameleoncloud.org:7480")
-
-# Local fallback paths (used when AWS credentials are not set)
-LOCAL_DATA_PATH  = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_train.csv"
-LOCAL_EVAL_PATH  = REPO_ROOT / "data_pipeline" / "processed" / "batch_datasets" / "forecasting_eval.csv"
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from _common import (  # noqa: E402
+    get_latest_production_metric,
+    load_and_combine,
+    load_config,
+    log as _log,
+    register_model_version,
+    setup_mlflow,
+    should_register,
+)
 
 
-# ---------------------------------------------------------------------------
-# Data loading — S3 first, local fallback
-# ---------------------------------------------------------------------------
-def _s3_client():
-    return boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-    )
+def log(msg):
+    _log("M3", msg)
 
 
-def _load_csv_from_s3(key: str) -> pd.DataFrame:
-    s3 = _s3_client()
-    print(f"  Downloading s3://{S3_BUCKET}/{key} ...")
-    obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
-    return pd.read_csv(io.BytesIO(obj["Body"].read()))
+USER_COL = "synthetic_user_id"
+DATE_COL = "year_month"
+CATEGORY_COL = "project_category"
+SPEND_COL = "monthly_spend"
 
 
-def load_data_csv(filename: str, local_path: Path) -> pd.DataFrame:
-    """Load CSV from S3 if credentials available, else local filesystem."""
-    aws_key = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
-    if aws_key:
-        try:
-            key = f"{S3_PREFIX}/{filename}"
-            df = _load_csv_from_s3(key)
-            print(f"  Loaded {filename} from S3 ({len(df):,} rows)")
-            return df
-        except Exception as e:
-            print(f"  S3 load failed ({e}), falling back to local...")
-
-    if not local_path.exists():
-        raise FileNotFoundError(
-            f"No data found. Set AWS_ACCESS_KEY_ID to load from S3, "
-            f"or ensure {local_path} exists."
-        )
-    df = pd.read_csv(local_path)
-    print(f"  Loaded {filename} from local ({len(df):,} rows)")
-    return df
-
-# Features that cannot be computed from real ActualBudget data at inference time.
-# Drop them so the served model only uses features the inference service can provide.
-DROP_AT_TRAIN = [
-    "persona_cluster",
-    "AGE_REF",
-    "FAM_SIZE",
-    "user_scale",
-    # Cross-user aggregate features — not computable at inference time from
-    # a single user's ActualBudget data; always zeroed at inference → training bias
-    "user_total_lag_1",
-    "user_total_rolling_mean_3",
-    "category_share_lag_1",
-    # Budget field — not available in synthetic training data and always 0 in the
-    # inference service's ForecastFeatureRow schema (ActualBudget budget targets
-    # are read separately in app.ts and compared post-inference, not fed into the
-    # model). Including it in training on zeroed values causes systematic bias.
-    "budgeted",
-]
-
-
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-def _add_trig_features(df: pd.DataFrame) -> pd.DataFrame:
-    df["month"] = pd.to_datetime(df["year_month"]).dt.month
-    df["year"]  = pd.to_datetime(df["year_month"]).dt.year
-    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
-    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+def load_split(bootstrap_path, production_path=None):
+    df = load_and_combine(bootstrap_path, production_path, prefix="M3")
+    log(f"loaded {len(df):,} rows, {df[USER_COL].nunique()} users, {df[CATEGORY_COL].nunique()} categories")
+    df = df.dropna(subset=[CATEGORY_COL, SPEND_COL])
     return df
 
 
-def _build_supervised_rows(monthly_df: pd.DataFrame, min_history: int = 3) -> pd.DataFrame:
-    """Build supervised lag-feature rows from a simple monthly aggregation.
-
-    Input columns: synthetic_user_id (optional), year_month, project_category, monthly_spend
-    Output: one row per (user, category, month) with lag features and target.
-    """
-    rows = []
-    group_cols = ["synthetic_user_id", "project_category"] if "synthetic_user_id" in monthly_df.columns else ["project_category"]
-
-    for keys, grp in monthly_df.groupby(group_cols):
-        grp = grp.sort_values("year_month").reset_index(drop=True)
-        history  = grp["monthly_spend"].tolist()
-        months   = grp["year_month"].tolist()
-        user_id  = keys[0] if "synthetic_user_id" in monthly_df.columns else "single_user"
-        cat      = keys[-1]
-
-        if len(history) < min_history + 1:
-            continue
-
-        for i in range(min_history, len(history)):
-            prior  = history[:i]
-            prior3 = prior[-3:]
-            prior6 = prior[-6:]
-            target = history[i]
-            month_num = int(months[i][5:7])
-            year      = int(months[i][:4])
-            rows.append({
-                "synthetic_user_id": user_id,
-                "project_category":  cat,
-                "year_month":        months[i],
-                "target_next_month_spend": target,
-                "monthly_spend":     prior[-1],
-                "lag_1":  prior[-1] if len(prior) >= 1 else 0,
-                "lag_2":  prior[-2] if len(prior) >= 2 else 0,
-                "lag_3":  prior[-3] if len(prior) >= 3 else 0,
-                "lag_4":  prior[-4] if len(prior) >= 4 else 0,
-                "lag_5":  prior[-5] if len(prior) >= 5 else 0,
-                "lag_6":  prior[-6] if len(prior) >= 6 else 0,
-                "rolling_mean_3": float(np.mean(prior3)),
-                "rolling_std_3":  float(np.std(prior3, ddof=1))  if len(prior3) > 1 else 0.0,
-                "rolling_mean_6": float(np.mean(prior6)),
-                "rolling_max_3":  float(np.max(prior3)),
-                "history_month_count": len(prior),
-                "month_num": month_num,
-                "quarter":   (month_num - 1) // 3 + 1,
-                "year":      year,
-                "is_q4":     1 if month_num in [10, 11, 12] else 0,
-                "month_sin": float(np.sin(2 * np.pi * month_num / 12)),
-                "month_cos": float(np.cos(2 * np.pi * month_num / 12)),
-            })
-    return pd.DataFrame(rows)
+def build_baseline_table(train_df):
+    log("computing per-category population statistics")
+    grouped = train_df.groupby(CATEGORY_COL)
+    stats = grouped[SPEND_COL].agg(
+        mean="mean",
+        std="std",
+        median="median",
+        p25=lambda x: x.quantile(0.25),
+        p75=lambda x: x.quantile(0.75),
+        n_observations="count",
+    ).reset_index()
+    n_users = grouped[USER_COL].nunique().reset_index()
+    n_users.columns = [CATEGORY_COL, "n_users"]
+    stats = stats.merge(n_users, on=CATEGORY_COL)
+    stats["std"] = stats["std"].fillna(0.0)
+    return stats
 
 
-def load_data(filename: str, local_path: Path):
-    df = load_data_csv(filename, local_path)
-
-    # Detect format:
-    # - "supervised" format has target_next_month_spend and lag columns already
-    # - "simple" format has only [synthetic_user_id, year_month, project_category, monthly_spend]
-    if "target_next_month_spend" not in df.columns:
-        print(f"  Detected simple monthly format — building supervised rows...")
-        df = _build_supervised_rows(df)
-        print(f"  Built {len(df):,} supervised rows")
-
-    if "year_month" in df.columns and "month" not in df.columns:
-        df = _add_trig_features(df)
-
-    drop_cols = ["synthetic_user_id", "year_month"] + [
-        c for c in DROP_AT_TRAIN if c in df.columns
-    ]
-    target = "target_next_month_spend"
-
-    X = df.drop(columns=[c for c in drop_cols + [target] if c in df.columns])
-    y = df[target]
-    return X, y, df
+def evaluate_baseline(eval_df, baseline_table):
+    means = baseline_table.set_index(CATEGORY_COL)["mean"].to_dict()
+    scored = eval_df.copy()
+    scored["pred_mean"] = scored[CATEGORY_COL].map(means)
+    scored = scored.dropna(subset=["pred_mean"])
+    scored["abs_err"] = (scored["pred_mean"] - scored[SPEND_COL]).abs()
+    per_cat = scored.groupby(CATEGORY_COL).agg(mae=("abs_err", "mean"), n=("abs_err", "count")).reset_index()
+    overall_mean_mae = float(scored["abs_err"].mean())
+    median_per_cat_mae = float(per_cat["mae"].median())
+    return per_cat, overall_mean_mae, median_per_cat_mae
 
 
-# ---------------------------------------------------------------------------
-# Evaluation helpers
-# ---------------------------------------------------------------------------
-def evaluate_per_category(df, y_true, y_pred):
-    tmp = df.copy()
-    tmp["y_true"] = y_true
-    tmp["y_pred"] = y_pred
-    tmp["abs_err"] = (tmp["y_true"] - tmp["y_pred"]).abs()
-    return tmp.groupby("project_category")["abs_err"].mean().reset_index(name="mae")
-
-
-def get_previous_mae(client: MlflowClient) -> float | None:
-    """Return the overall_mae of the latest registered version, or None."""
-    try:
-        versions = client.search_model_versions(f"name='{MODEL_NAME}'")
-        if not versions:
-            return None
-        latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
-        run = client.get_run(latest.run_id)
-        return run.data.metrics.get("overall_mae")
-    except Exception as e:
-        print(f"[WARN] could not fetch previous MAE: {e}")
-        return None
-
-
-def get_previous_per_category_mae(client: MlflowClient) -> dict[str, float]:
-    """Return per-category MAE metrics from the latest registered version.
-
-    Metric keys are stored as mae_<category> (spaces/slashes replaced with _).
-    Returns empty dict if no previous version exists or metrics not found.
-    """
-    try:
-        versions = client.search_model_versions(f"name='{MODEL_NAME}'")
-        if not versions:
-            return {}
-        latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
-        run = client.get_run(latest.run_id)
-        result = {}
-        for key, val in run.data.metrics.items():
-            if key.startswith("mae_"):
-                cat = key[4:]  # strip "mae_" prefix
-                result[cat] = val
-        return result
-    except Exception as e:
-        print(f"[WARN] could not fetch previous per-category MAE: {e}")
-        return {}
-
-
-def check_category_regression(
-    per_cat_df: pd.DataFrame,
-    prev_per_cat: dict[str, float],
-    max_regression: float = CATEGORY_REGRESSION_MAX,
-) -> tuple[bool, list[str]]:
-    """Check that no category's MAE regressed by more than max_regression (relative).
-
-    Returns (gate_passed, list_of_regressed_categories).
-    """
-    regressed = []
-    for _, row in per_cat_df.iterrows():
-        cat_key = row["project_category"].replace(" ", "_").replace("/", "_")
-        new_mae = float(row["mae"])
-        old_mae = prev_per_cat.get(cat_key)
-        if old_mae is None or old_mae == 0.0:
-            continue  # no baseline, skip
-        relative_change = (new_mae - old_mae) / old_mae
-        if relative_change > max_regression:
-            regressed.append(
-                f"{cat_key}: {old_mae:.2f} → {new_mae:.2f} "
-                f"(+{relative_change * 100:.1f}%)"
-            )
-    return len(regressed) == 0, regressed
-
-
-def _compute_data_hash(df_train: pd.DataFrame, df_eval: pd.DataFrame) -> str:
-    """MD5 hash of combined train+eval data for reproducibility tracking."""
-    combined_bytes = (
-        df_train.to_csv(index=False) + df_eval.to_csv(index=False)
-    ).encode("utf-8")
-    return hashlib.md5(combined_bytes).hexdigest()
-
-
-def _get_git_commit() -> str:
-    """Return short git commit hash, or 'unknown' if git unavailable."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    mlflow.set_tracking_uri(MLFLOW_URI)
-    mlflow.set_experiment(EXPERIMENT_NAME)
-    client = MlflowClient(tracking_uri=MLFLOW_URI)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config_m3.yaml")
+    parser.add_argument("--mode", choices=["bootstrap", "retrain"], default="bootstrap")
+    args = parser.parse_args()
+    config = load_config(args.config)
 
-    aws_key = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
-    data_source = f"s3://{S3_BUCKET}/{S3_PREFIX}" if aws_key else str(LOCAL_DATA_PATH.parent)
-    print(f"Loading training data from: {data_source}")
+    tracking_uri = setup_mlflow(config)
+    train_path = os.environ.get("M3_TRAIN_PATH", config["train_path"])
+    eval_path = os.environ.get("M3_EVAL_PATH", config["eval_path"])
+    production_path = config.get("production_path") if args.mode == "retrain" else None
+    gate_median_mae = float(
+        os.environ.get("M3_GATE_MEDIAN_MAE", config.get("quality_gate_median_mae", 1000.0))
+    )
+    registered_model_name = config.get("registered_model_name", "m3-forecast-base")
 
-    git_commit = _get_git_commit()
-    print(f"Git commit: {git_commit}")
+    log(f"mode={args.mode} tracking_uri={tracking_uri}")
+    log(f"train_path={train_path}")
+    log(f"production_path={production_path}")
+    log(f"gate_median_mae={gate_median_mae}")
 
-    # Load raw monthly files
-    train_raw = load_data_csv("forecasting_train.csv", LOCAL_DATA_PATH)
-    eval_raw  = load_data_csv("forecasting_eval.csv",  LOCAL_EVAL_PATH)
-
-    data_hash = _compute_data_hash(train_raw, eval_raw)
-    print(f"Data hash (MD5): {data_hash}")
-
-    # If simple monthly format: build supervised rows from combined data,
-    # then re-split by month so eval rows have access to train-period lag history
-    if "target_next_month_spend" not in train_raw.columns:
-        print("  Detected simple monthly format — building supervised rows from combined data...")
-        combined = pd.concat([train_raw, eval_raw], ignore_index=True).drop_duplicates()
-        supervised = _build_supervised_rows(combined)
-        print(f"  Built {len(supervised):,} total supervised rows")
-
-        # Re-split by year_month (same split point as batch_pipeline.py: 80/20)
-        all_months = sorted(supervised["year_month"].unique())
-        split_idx  = int(len(all_months) * 0.8)
-        train_months = set(all_months[:split_idx])
-        eval_months  = set(all_months[split_idx:])
-        train_df = supervised[supervised["year_month"].isin(train_months)].copy()
-        eval_df  = supervised[supervised["year_month"].isin(eval_months)].copy()
-        print(f"  Train: {len(train_df):,} rows | Eval: {len(eval_df):,} rows")
-    else:
-        # Already in supervised format — add trig features if missing
-        if "month" not in train_raw.columns:
-            train_raw = _add_trig_features(train_raw)
-            eval_raw  = _add_trig_features(eval_raw)
-        train_df = train_raw
-        eval_df  = eval_raw
-
-    DROP_COLS = ["synthetic_user_id", "year_month"] + [c for c in DROP_AT_TRAIN if c in train_df.columns]
-    TARGET    = "target_next_month_spend"
-
-    X_train = train_df.drop(columns=[c for c in DROP_COLS + [TARGET] if c in train_df.columns])
-    y_train = train_df[TARGET]
-    X_eval  = eval_df.drop(columns=[c for c in DROP_COLS + [TARGET] if c in eval_df.columns])
-    y_eval  = eval_df[TARGET]
-
-    # Consistent one-hot encoding across train/eval
-    X_train = pd.get_dummies(X_train, dummy_na=True)
-    X_eval = pd.get_dummies(X_eval, dummy_na=True)
-    X_eval = X_eval.reindex(columns=X_train.columns, fill_value=0)
-
-    feature_columns = list(X_train.columns)
-    print(f"Training with {len(feature_columns)} features, {len(train_df)} rows")
-
-    # Fetch previous per-category MAE before starting the run (used for regression gate)
-    prev_per_cat_mae = get_previous_per_category_mae(client)
+    train_df = load_split(train_path, production_path)
+    eval_df = load_split(eval_path, None)
 
     with mlflow.start_run() as run:
-        start = time.time()
-
-        model = HistGradientBoostingRegressor(
-            max_depth=6,
-            learning_rate=0.05,
-            max_iter=300,
-            random_state=42,
+        mlflow.log_params(
+            {
+                "mode": args.mode,
+                "model_type": "population_baseline_per_category",
+                "model_role": "cold_start_base",
+                "train_path": train_path,
+                "production_path": production_path or "",
+                "eval_path": eval_path,
+                "train_rows": len(train_df),
+                "eval_rows": len(eval_df),
+                "gate_median_mae": gate_median_mae,
+                "python_version": platform.python_version(),
+                "platform": platform.platform(),
+            }
         )
-        model.fit(X_train, y_train)
+
+        start = time.time()
+        baseline_table = build_baseline_table(train_df)
+        baseline_table.to_csv("m3_baseline.csv", index=False)
+
+        per_cat, overall_mean_mae, median_per_cat_mae = evaluate_baseline(eval_df, baseline_table)
         train_time = time.time() - start
 
-        y_pred = model.predict(X_eval)
-        overall_mae = mean_absolute_error(y_eval, y_pred)
-        per_cat = evaluate_per_category(eval_df, y_eval, y_pred)
-        median_per_cat_mae = float(per_cat["mae"].median())
-
-        # ----------------------------------------------------------------
-        # MLflow logging
-        # ----------------------------------------------------------------
-        mlflow.log_param("model", "HistGradientBoostingRegressor")
-        mlflow.log_param("features", len(feature_columns))
-        mlflow.log_param("train_rows", len(train_df))
-        mlflow.log_param("eval_rows", len(eval_df))
-        mlflow.log_param("mae_gate", MAE_GATE)
-        mlflow.log_param("category_regression_max", CATEGORY_REGRESSION_MAX)
-        mlflow.log_param("dropped_at_train", ",".join(DROP_AT_TRAIN))
-        mlflow.log_param("data_source", data_source)
-
-        mlflow.log_metric("overall_mae", overall_mae)
-        mlflow.log_metric("median_per_category_mae", median_per_cat_mae)
-        mlflow.log_metric("train_time_seconds", train_time)
-
+        log(f"baseline computed in {train_time:.2f}s")
+        log(f"overall mean MAE = {overall_mean_mae:.2f}")
+        log(f"median per-category MAE = {median_per_cat_mae:.2f}")
+        log("per-category MAE:")
         for _, row in per_cat.iterrows():
-            name = row["project_category"].replace(" ", "_").replace("/", "_")
-            mlflow.log_metric(f"mae_{name}", float(row["mae"]))
+            log(f"  {row[CATEGORY_COL]:20s} mae={row['mae']:>10.2f} n={int(row['n'])}")
 
-        # Accountability + reproducibility tags
-        mlflow.set_tag("git_commit", git_commit)
-        mlflow.set_tag("data_hash_md5", data_hash)
+        mlflow.log_metric("train_time_seconds", train_time)
+        mlflow.log_metric("overall_mean_mae", overall_mean_mae)
+        mlflow.log_metric("median_of_per_category_mae", median_per_cat_mae)
+        mlflow.log_metric("n_categories", len(baseline_table))
+        for _, row in per_cat.iterrows():
+            safe = row[CATEGORY_COL].replace(" ", "_").replace("/", "_")
+            mlflow.log_metric(f"mae_{safe}", float(row["mae"]))
 
-        # Log bundle as MLflow artifact (serving loads from here, not local disk)
-        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            bundle_path = Path(tmpdir) / "m3_bundle.joblib"
-            bundle = {
-                "model": model,
-                "feature_columns": feature_columns,
-                "model_name": MODEL_NAME,
-            }
-            joblib.dump(bundle, bundle_path)
-            mlflow.log_artifact(str(bundle_path), artifact_path="bundle")
+            tp = Path(tmpdir) / "m3_baseline.parquet"
+            baseline_table.to_parquet(tp, index=False)
+            mlflow.log_artifact(str(tp), artifact_path="baseline")
+            cp = Path(tmpdir) / "m3_baseline.csv"
+            baseline_table.to_csv(cp, index=False)
+            mlflow.log_artifact(str(cp), artifact_path="baseline")
 
-        print(f"Overall MAE:           {overall_mae:.4f}")
-        print(f"Median per-cat MAE:    {median_per_cat_mae:.4f}")
-        print(f"MAE gate threshold:    {MAE_GATE:.4f}")
-
-        # ----------------------------------------------------------------
-        # Gate 1 — absolute MAE floor
-        # ----------------------------------------------------------------
-        absolute_gate_passed = overall_mae <= MAE_GATE
-
-        # ----------------------------------------------------------------
-        # Gate 2 — improvement over previous registered version (overall)
-        # ----------------------------------------------------------------
-        prev_mae = get_previous_mae(client)
-        if prev_mae is None:
-            improvement_gate_passed = True
-            register_reason = f"first version (mae={overall_mae:.4f})"
-        elif overall_mae < prev_mae:
-            improvement_gate_passed = True
-            register_reason = f"improved mae {prev_mae:.4f} → {overall_mae:.4f}"
-        else:
-            improvement_gate_passed = False
-            register_reason = f"no improvement (prev={prev_mae:.4f}, curr={overall_mae:.4f})"
-
-        # ----------------------------------------------------------------
-        # Gate 3 — per-category regression check
-        # No single category may regress by more than CATEGORY_REGRESSION_MAX
-        # relative to the previous registered version.
-        # ----------------------------------------------------------------
-        if prev_per_cat_mae:
-            cat_gate_passed, regressed_cats = check_category_regression(
-                per_cat, prev_per_cat_mae, CATEGORY_REGRESSION_MAX
-            )
-        else:
-            cat_gate_passed = True  # no baseline, skip
-            regressed_cats = []
-
-        if regressed_cats:
-            print(f"[WARN] Per-category regression detected in {len(regressed_cats)} categories:")
-            for r in regressed_cats:
-                print(f"  {r}")
-
-        mlflow.set_tag("absolute_gate_passed", str(absolute_gate_passed).lower())
-        mlflow.set_tag("improvement_gate_passed", str(improvement_gate_passed).lower())
-        mlflow.set_tag("category_regression_gate_passed", str(cat_gate_passed).lower())
-        mlflow.set_tag("regressed_categories", "; ".join(regressed_cats) if regressed_cats else "none")
-        do_register = absolute_gate_passed and improvement_gate_passed and cat_gate_passed
-        mlflow.set_tag("registered", str(do_register).lower())
-        mlflow.set_tag("register_reason", register_reason)
-        mlflow.set_tag("previous_mae", str(prev_mae))
-
-        if not absolute_gate_passed:
-            print(f"GATE FAILED: mae={overall_mae:.4f} > threshold={MAE_GATE:.4f} — not registering")
-            sys.exit(0)
-
-        if not improvement_gate_passed:
-            print(f"GATE FAILED: {register_reason} — not registering")
-            sys.exit(0)
-
-        if not cat_gate_passed:
-            print(
-                f"GATE FAILED: {len(regressed_cats)} category(ies) regressed "
-                f">{CATEGORY_REGRESSION_MAX * 100:.0f}% vs previous version — not registering"
-            )
-            sys.exit(0)
-
-        # ----------------------------------------------------------------
-        # Register model version in MLflow
-        # ----------------------------------------------------------------
-        try:
-            client.get_registered_model(MODEL_NAME)
-        except Exception:
-            client.create_registered_model(MODEL_NAME)
-
-        model_uri = f"runs:/{run.info.run_id}/bundle"
-        mv = client.create_model_version(
-            name=MODEL_NAME,
-            source=model_uri,
-            run_id=run.info.run_id,
+        absolute_passed = median_per_cat_mae <= gate_median_mae
+        prev_version, prev_metric = get_latest_production_metric(
+            registered_model_name, "median_of_per_category_mae"
         )
-        print(f"Registered {MODEL_NAME} v{mv.version}: {register_reason}")
+        log(f"previous: v{prev_version} median_per_cat_mae={prev_metric}")
+
+        do_register, reason = should_register(
+            mode=args.mode,
+            current_metric=median_per_cat_mae,
+            previous_metric=prev_metric,
+            higher_is_better=False,
+            absolute_gate_passed=absolute_passed,
+            prefix="M3",
+        )
+
+        mlflow.set_tag("quality_gate_metric", "median_of_per_category_mae")
+        mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
+        mlflow.set_tag("registered", str(do_register).lower())
+        mlflow.set_tag("register_reason", reason)
+        mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")
+        mlflow.set_tag("mode", args.mode)
+        mlflow.set_tag("model_role", "cold_start_base")
+
+        if do_register:
+            client = MlflowClient()
+            mv = register_model_version(client, registered_model_name, run.info.run_id, "baseline")
+            log(f"REGISTERED v{mv.version} — {reason}")
+        else:
+            log(f"NOT REGISTERED — {reason}")
+
+        log(f"done | run_id={run.info.run_id}")
 
 
 if __name__ == "__main__":
