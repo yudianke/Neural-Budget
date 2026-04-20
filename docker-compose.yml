@@ -272,22 +272,36 @@ services:
 
   # --------------------------------------------------------------------------
   # ActualBudget — dev UI
-  # Run separately on the VM using the command below (not part of docker-compose up)
-  # because the old docker-compose version on the VM has a bug with anonymous volumes.
-  #
-  # Start command (run from ~/Neural-Budget on the VM):
-  #
-  #   docker stop actual-development 2>/dev/null; docker rm actual-development 2>/dev/null
-  #   docker build -t actual-development ./actual
-  #   docker run -d \
-  #     --name actual-development \
-  #     --network neural-budget_ml-net \
-  #     -e HTTPS=true \
-  #     -e M1_SERVICE_URL=http://m1-serving:8001 \
-  #     -e M2_SERVICE_URL=http://m2-serving:8003 \
-  #     -e M3_SERVICE_URL=http://m3-serving:8002 \
-  #     -p 3001:3001 \
-  #     -v ~/Neural-Budget/actual:/app \
-  #     --restart unless-stopped \
-  #     actual-development
+  # ML service URLs point to container names on ml-net (not host.docker.internal)
   # --------------------------------------------------------------------------
+  actual-development:
+    build:
+      context: ./actual
+      dockerfile: Dockerfile
+    image: actual-development
+    container_name: actual-development
+    environment:
+      - HTTPS
+      - M1_SERVICE_URL=http://m1-serving:8001
+      - M2_SERVICE_URL=http://m2-serving:8003
+      - M3_SERVICE_URL=http://m3-serving:8002
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./actual:/app
+      - /app/node_modules
+      - /app/packages/loot-core/node_modules
+      - /app/packages/desktop-client/node_modules
+      - /app/packages/component-library/node_modules
+      - /app/packages/crdt/node_modules
+      - /app/packages/sync-server/node_modules
+      - /app/packages/api/node_modules
+      - /app/packages/desktop-electron/node_modules
+      - /app/packages/plugins-service/node_modules
+    networks:
+      - ml-net
+    depends_on:
+      - m1-serving
+      - m2-serving
+      - m3-serving
+    restart: unless-stopped
