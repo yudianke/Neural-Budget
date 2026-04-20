@@ -99,8 +99,38 @@ def _sklearn_to_onnx_bytes(pipeline) -> bytes:
     return onnx_model.SerializeToString()
 
 
+def _load_pipeline_via_rest(tracking_uri: str, logged_model_id: str) -> object:
+    """Download model.pkl directly via MLflow REST API — no S3 credentials needed.
+
+    MLflow proxies artifact downloads through its own HTTP API, so this works
+    even when the S3 backend is inaccessible from the serving container.
+    Format: GET /ajax-api/2.0/mlflow/logged-models/{id}/artifacts/files?artifact_file_path=model.pkl
+    """
+    import tempfile
+    import joblib
+    import urllib.request
+
+    url = (
+        f"{tracking_uri.rstrip('/')}/ajax-api/2.0/mlflow/logged-models"
+        f"/{logged_model_id}/artifacts/files?artifact_file_path=model.pkl"
+    )
+    log.info(f"REST download: {url}")
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+        tmp_path = f.name
+    urllib.request.urlretrieve(url, tmp_path)
+    size_kb = os.path.getsize(tmp_path) / 1024
+    log.info(f"Downloaded model.pkl via REST ({size_kb:.0f} KB)")
+    pipeline = joblib.load(tmp_path)
+    os.unlink(tmp_path)
+    return pipeline
+
+
 def _load_from_mlflow() -> Optional[str]:
     """Download latest M2 model from MLflow registry, convert to ONNX, return version string.
+
+    Two download strategies (in order):
+      1. mlflow.sklearn.load_model() via S3 — works when AWS credentials are set
+      2. REST API download via MLflow HTTP proxy — works without S3 credentials
 
     Returns the version string on success, None on failure.
     Fail-open: any exception is caught and logged — caller falls back to disk model.
@@ -111,6 +141,10 @@ def _load_from_mlflow() -> Optional[str]:
 
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_URI)
     model_name = os.environ.get("M2_REGISTERED_MODEL_NAME", DEFAULT_MODEL_NAME)
+    # Hardcoded logged model ID from export_to_onnx.py — used by REST fallback
+    rest_fallback_logged_model_id = os.environ.get(
+        "M2_LOGGED_MODEL_ID", "m-c0a5e85dd6b0494ba3b1fa394db99480"
+    )
 
     if not _mlflow_reachable(tracking_uri):
         log.warning(f"MLflow at {tracking_uri} unreachable — skipping MLflow pull")
@@ -127,9 +161,28 @@ def _load_from_mlflow() -> Optional[str]:
         latest = max(versions, key=lambda v: int(v.version))
         log.info(f"MLflow: found '{model_name}' v{latest.version} (run_id={latest.run_id})")
 
-        model_uri = f"runs:/{latest.run_id}/model"
-        log.info(f"Downloading model from {model_uri} ...")
-        pipeline = mlflow.sklearn.load_model(model_uri)
+        # Strategy 1: standard mlflow.sklearn.load_model (needs S3 credentials)
+        pipeline = None
+        try:
+            model_uri = f"runs:/{latest.run_id}/model"
+            log.info(f"Strategy 1: downloading model from {model_uri} ...")
+            pipeline = mlflow.sklearn.load_model(model_uri)
+            log.info("Strategy 1 (S3) succeeded")
+        except Exception as s3_err:
+            log.warning(f"Strategy 1 (S3) failed: {s3_err}")
+
+        # Strategy 2: REST API download via MLflow HTTP proxy (no S3 creds needed)
+        if pipeline is None:
+            try:
+                log.info(f"Strategy 2: REST download, logged_model_id={rest_fallback_logged_model_id}")
+                pipeline = _load_pipeline_via_rest(tracking_uri, rest_fallback_logged_model_id)
+                log.info("Strategy 2 (REST) succeeded")
+            except Exception as rest_err:
+                log.warning(f"Strategy 2 (REST) failed: {rest_err}")
+
+        if pipeline is None:
+            log.warning("Both download strategies failed — falling back to disk model")
+            return None
 
         log.info("Converting sklearn Pipeline to ONNX in memory ...")
         onnx_bytes = _sklearn_to_onnx_bytes(pipeline)
