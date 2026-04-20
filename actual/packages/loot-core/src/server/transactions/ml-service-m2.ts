@@ -37,6 +37,18 @@ const DEFAULT_M2_URL = 'http://localhost:8003';
 const MIN_TRANSACTIONS = 50;
 
 function getM2ServiceUrl(): string {
+  // If running in a browser Web Worker, use the same-origin Vite proxy
+  // to avoid COEP/CORS blocking (mirrors M1's getM1ServiceUrl pattern)
+  const workerScope =
+    typeof self !== 'undefined'
+      ? (self as typeof globalThis & {
+          importScripts?: unknown;
+          location?: Location;
+        })
+      : null;
+  if (workerScope && workerScope.location) {
+    return `${workerScope.location.origin}/m2-api`;
+  }
   return (
     (typeof process !== 'undefined' && process.env?.M2_SERVICE_URL) ||
     DEFAULT_M2_URL

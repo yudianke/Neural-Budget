@@ -283,6 +283,11 @@ export default defineConfig(async ({ mode }) => {
           changeOrigin: true,
           rewrite: (p: string) => p.replace(/^\/ml-api/, ''),
         },
+        '/m2-api': {
+          target: env.M2_SERVICE_URL || 'http://localhost:8003',
+          changeOrigin: true,
+          rewrite: (p: string) => p.replace(/^\/m2-api/, ''),
+        },
         '/m3-api': {
           target: env.M3_SERVICE_URL || 'http://localhost:8002',
           changeOrigin: true,

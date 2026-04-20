@@ -97,11 +97,9 @@ function getM1ServiceUrl(): string {
         })
       : null;
   // If running in a browser Web Worker, use the same-origin proxy
-  if (
-    workerScope &&
-    typeof workerScope.importScripts === 'function' &&
-    workerScope.location
-  ) {
+  // to avoid COEP/CORS blocking. Check location only (not importScripts)
+  // since module workers don't expose importScripts.
+  if (workerScope && workerScope.location) {
     return `${workerScope.location.origin}/ml-api`;
   }
   return (
