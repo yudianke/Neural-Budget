@@ -279,7 +279,6 @@ services:
       context: ./actual
       dockerfile: Dockerfile
     image: actual-development
-    container_name: actual-development
     environment:
       - HTTPS
       - M1_SERVICE_URL=http://m1-serving:8001
