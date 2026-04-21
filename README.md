@@ -289,20 +289,53 @@ The ForecastCard in the ActualBudget dashboard shows:
 
 ## Full Stack
 
-```bash
-# Start everything
-docker compose up -d --build
+### Step 1 — Start ML stack + daemons + monitoring
 
-# Required env vars (in shell or .env file — do not commit)
-export MLFLOW_TRACKING_URI=http://129.114.27.211:8000
-export AWS_ACCESS_KEY_ID=<chameleon-object-store-key>
-export AWS_SECRET_ACCESS_KEY=<chameleon-object-store-secret>
+```bash
+# Clone and enter repo
+git clone https://github.com/yudianke/Neural-Budget.git
+cd Neural-Budget
+
+# Create .env (copy from .env.example and fill in credentials)
+cp .env.example .env
+
+# Start everything
+docker-compose up -d --build
+```
+
+### Step 2 — Start ActualBudget (run separately on VM due to docker-compose version)
+
+```bash
+docker stop actual-development 2>/dev/null; docker rm actual-development 2>/dev/null
+docker build -t actual-development ./actual
+docker run -d \
+  --name actual-development \
+  --network neural-budget_ml-net \
+  -e HTTPS=true \
+  -e M1_SERVICE_URL=http://m1-serving:8001 \
+  -e M2_SERVICE_URL=http://m2-serving:8003 \
+  -e M3_SERVICE_URL=http://m3-serving:8002 \
+  -p 3001:3001 \
+  -v ~/Neural-Budget/actual:/app \
+  --restart unless-stopped \
+  actual-development
+```
+
+> **Note:** `HTTPS=true` is required when accessing ActualBudget from an external browser. Without it, the browser blocks `SharedArrayBuffer` which ActualBudget requires. Access via `https://` and accept the self-signed certificate warning.
+
+### Required env vars (in `.env` file — do not commit)
+
+```bash
+MLFLOW_TRACKING_URI=http://129.114.27.211:8000
+AWS_ACCESS_KEY_ID=<chameleon-object-store-key>
+AWS_SECRET_ACCESS_KEY=<chameleon-object-store-secret>
+MLFLOW_S3_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480
 ```
 
 Services:
 | Container | Port | Description |
 |---|---|---|
-| `actual-development` | 3001 | ActualBudget UI (React + Node.js) |
+| `actual-development` | 3001 | ActualBudget UI — access via `https://` |
 | `m1-serving` | 8001 | M1 categorization inference |
 | `retrain-daemon` | — | M1 weekly retrain + rollback |
 | `m2-serving` | 8003 | M2 anomaly detection inference |
@@ -311,6 +344,15 @@ Services:
 | `m3-monitor-daemon` | — | M3 monthly retrain + rollback |
 | `prometheus` | 9090 | Metrics scraping |
 | `grafana` | 3000 | Dashboards (admin pw: `neuralbudget`) |
+
+### URLs (Chameleon VM: `129.114.27.248`)
+
+| Service | URL |
+|---|---|
+| ActualBudget | `https://129.114.27.248:3001` |
+| Grafana | `http://129.114.27.248:3000` (admin / neuralbudget) |
+| Prometheus | `http://129.114.27.248:9090` |
+| MLflow | `http://129.114.27.211:8000` |
 
 MLflow UI: http://129.114.27.211:8000
 
