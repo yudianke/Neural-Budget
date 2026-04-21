@@ -67,7 +67,7 @@ python3 train_m1.py --config config_xgb.yaml
 # Docker
 docker build -f Dockerfile.m1 -t m1-training .
 docker run --rm \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   -e AWS_ACCESS_KEY_ID=<key> \
   -e AWS_SECRET_ACCESS_KEY=<secret> \
   m1-training
@@ -87,7 +87,7 @@ Promotion gate: new model must improve macro-F1 without >2% regression on the to
 cd serving/m1_baseline
 docker build -t m1-serving .
 docker run -p 8001:8001 \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   m1-serving
 ```
 
@@ -135,7 +135,7 @@ Cold-start guard: inactive until the user has ≥ 50 transactions.
 # Docker (Chameleon)
 docker build -f training/m2/Dockerfile.m2 -t m2-training .
 docker run --rm \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   -e AWS_ACCESS_KEY_ID=<key> \
   -e AWS_SECRET_ACCESS_KEY=<secret> \
   m2-training
@@ -172,7 +172,7 @@ docker exec m2-retrain-daemon bash /app/training/m2/run_m2_retrain.sh
 cd serving/m2_onnx_multiworker
 docker build -t m2-serving .
 docker run -p 8003:8003 \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   -e M2_FEEDBACK_LOG_PATH=/data/feedback/m2_feedback.jsonl \
   -e PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_m2 \
   m2-serving
@@ -232,7 +232,7 @@ python3 train_m3.py
 # Docker (reads from S3)
 docker build -f Dockerfile.m3 -t m3-training .
 docker run --rm \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   -e AWS_ACCESS_KEY_ID=<key> \
   -e AWS_SECRET_ACCESS_KEY=<secret> \
   -e MLFLOW_S3_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480 \
@@ -278,7 +278,7 @@ json.dump(s,open(p,'w'))
 cd serving/m3
 docker build -t m3-serving .
 docker run -p 8002:8002 \
-  -e MLFLOW_TRACKING_URI=http://129.114.27.211:8000 \
+  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
   -e AWS_ACCESS_KEY_ID=<key> \
   -e AWS_SECRET_ACCESS_KEY=<secret> \
   -e MLFLOW_S3_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480 \
@@ -356,7 +356,7 @@ docker run -d \
 ### Required env vars (in `.env` file — do not commit)
 
 ```bash
-MLFLOW_TRACKING_URI=http://129.114.27.211:8000
+MLFLOW_TRACKING_URI=http://129.114.26.214:8000
 AWS_ACCESS_KEY_ID=<chameleon-object-store-key>
 AWS_SECRET_ACCESS_KEY=<chameleon-object-store-secret>
 MLFLOW_S3_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480
@@ -382,9 +382,9 @@ Services:
 | ActualBudget | `https://129.114.27.248:3001` |
 | Grafana | `http://129.114.27.248:3000` (admin / neuralbudget) |
 | Prometheus | `http://129.114.27.248:9090` |
-| MLflow | `http://129.114.27.211:8000` |
+| MLflow | `http://129.114.26.214:8000` |
 
-MLflow UI: http://129.114.27.211:8000
+MLflow UI: http://129.114.26.214:8000
 
 ---
 

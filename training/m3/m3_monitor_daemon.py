@@ -50,7 +50,7 @@ from mlflow.tracking import MlflowClient
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MLFLOW_URI      = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
+MLFLOW_URI      = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.214:8000")
 M3_SERVING_URL  = os.environ.get("M3_SERVING_URL", "http://m3-serving:8002")
 STATE_PATH      = Path(os.environ.get("M3_STATE_PATH", "/data/m3_state/monitor_state.json"))
 RETRAIN_SCRIPT  = os.environ.get("M3_RETRAIN_SCRIPT", "/app/training/m3/run_m3_retrain.sh")

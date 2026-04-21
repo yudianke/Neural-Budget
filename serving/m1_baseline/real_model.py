@@ -60,7 +60,7 @@ CATEGORY_MAP: dict[str, str] = {
     "Others": "misc",
 }
 
-DEFAULT_TRACKING_URI = "http://129.114.27.211:8000"
+DEFAULT_TRACKING_URI = "http://129.114.26.214:8000"
 # Try Ray model first, fall back to original sklearn pipeline
 DEFAULT_MODEL_NAME = "m1-ray-categorization"
 FALLBACK_MODEL_NAME = "m1-categorization"

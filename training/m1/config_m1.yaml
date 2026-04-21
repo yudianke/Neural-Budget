@@ -1,4 +1,4 @@
-mlflow_tracking_uri: http://129.114.27.211:8000
+mlflow_tracking_uri: http://129.114.26.214:8000
 experiment_name: m1-categorization
 registered_model_name: m1-categorization
 

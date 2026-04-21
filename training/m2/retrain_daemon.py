@@ -47,7 +47,7 @@ from mlflow.tracking import MlflowClient
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
-MLFLOW_URI        = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
+MLFLOW_URI        = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.214:8000")
 M2_SERVING_URL    = os.environ.get("M2_SERVING_URL", "http://m2-serving:8003")
 FEEDBACK_PATH     = Path(os.environ.get("M2_FEEDBACK_LOG_PATH", "/data/feedback/m2_feedback.jsonl"))
 STATE_PATH        = Path(os.environ.get("M2_DAEMON_STATE_PATH", "/data/feedback/m2_daemon_state.json"))

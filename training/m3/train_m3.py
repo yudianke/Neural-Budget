@@ -5,7 +5,7 @@ Usage:
     python train_m3.py
 
 Environment variables:
-    MLFLOW_TRACKING_URI       MLflow server URL (default: http://129.114.27.211:8000)
+    MLFLOW_TRACKING_URI       MLflow server URL (default: http://129.114.26.214:8000)
     M3_GATE_MAE               MAE threshold for absolute quality gate (default: 150.0)
     M3_CATEGORY_REGRESSION_MAX  Max allowed per-category MAE regression vs prev version (default: 0.30)
     M3_DATA_BUCKET            S3 bucket for training data (default: neural-budget-data-proj16)
@@ -47,7 +47,7 @@ from sklearn.metrics import mean_absolute_error
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
-MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
+MLFLOW_URI       = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.214:8000")
 MODEL_NAME       = "m3-forecast"
 EXPERIMENT_NAME  = "m3-forecast"
 MAE_GATE         = float(os.environ.get("M3_GATE_MAE", "150.0"))

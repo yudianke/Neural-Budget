@@ -46,7 +46,7 @@ logger = logging.getLogger("m3_service")
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MLFLOW_URI   = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.211:8000")
+MLFLOW_URI   = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.214:8000")
 MODEL_NAME   = os.environ.get("M3_REGISTERED_MODEL", "m3-forecast")
 MODEL_VER    = os.environ.get("M3_MODEL_VERSION")   # None = latest
 # URL to the ActualBudget monthly-history export (called by /metrics/forecast-accuracy).
