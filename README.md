@@ -6,6 +6,36 @@ An optional ML layer on top of [ActualBudget](https://github.com/actualbudget/ac
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Clone
+git clone https://github.com/yudianke/Neural-Budget.git
+cd Neural-Budget
+
+# 2. Start ML stack (M1, M2, M3, daemons, Prometheus, Grafana)
+docker-compose up -d --build
+
+# 3. Start ActualBudget with HTTPS
+docker stop actual-development 2>/dev/null; docker rm actual-development 2>/dev/null
+docker build -t actual-development ./actual
+docker run -d \
+  --name actual-development \
+  --network neural-budget_ml-net \
+  -e HTTPS=true \
+  -e M1_SERVICE_URL=http://m1-serving:8001 \
+  -e M2_SERVICE_URL=http://m2-serving:8003 \
+  -e M3_SERVICE_URL=http://m3-serving:8002 \
+  -p 3001:3001 \
+  -v ~/Neural-Budget/actual:/app \
+  --restart unless-stopped \
+  actual-development
+```
+
+Wait ~3 minutes for Vite build, then open **https://\<VM-IP\>:3001** (accept the self-signed certificate warning).
+
+---
+
 ## ML Features
 
 | Feature | Model | Status |
