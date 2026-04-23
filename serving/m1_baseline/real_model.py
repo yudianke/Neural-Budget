@@ -20,7 +20,15 @@ TEXT_COL = "merchant"
 NUMERIC_COLS = ["log_amount", "day_of_week", "day_of_month"]
 CONFIDENCE_THRESHOLD = 0.6  # auto_fill if confidence >= this value
 
-# Maps Ray model output labels → project dataset categories (moneydata_labeled.csv)
+# Canonical project categories output by v5+ models (trained on synthetic data).
+# These pass through map_category() unchanged.
+CANONICAL_CATEGORIES: frozenset[str] = frozenset({
+    "charity", "education", "entertainment", "gas", "groceries",
+    "healthcare", "housing", "misc", "personal_care", "restaurants",
+    "shopping", "transport", "utilities", "cash_transfers",
+})
+
+# Maps old moneydata model (v1–v4) output labels → project categories.
 CATEGORY_MAP: dict[str, str] = {
     # Food & Drink
     "Dine Out": "restaurants",
@@ -78,8 +86,17 @@ _fallback_mode = None
 
 
 def map_category(label: str) -> str:
-    """Translate a Ray model output label to a project dataset category."""
-    return CATEGORY_MAP.get(label, CATEGORY_MAP.get(label.strip(), "misc"))
+    """Translate a model output label to a project dataset category.
+
+    v5+ models (trained on synthetic data) already output canonical labels
+    ('restaurants', 'groceries', etc.) — pass those through directly.
+    v1–v4 models (trained on moneydata) output raw labels ('Dine Out',
+    'Groceries', etc.) — map those via CATEGORY_MAP.
+    """
+    label = label.strip()
+    if label in CANONICAL_CATEGORIES:
+        return label
+    return CATEGORY_MAP.get(label, "misc")
 
 
 def normalize_merchant(name: str) -> str:
@@ -227,7 +244,7 @@ def _predict_proba(row: pd.DataFrame) -> np.ndarray:
     """
     text_vec = _tfidf.transform(row[TEXT_COL].astype(str))
     num_vec = csr_matrix(row[NUMERIC_COLS].values.astype(float))
-    features = hstack([text_vec, num_vec]).toarray()
+    features = hstack([text_vec, num_vec], format="csr").astype(np.float32)
     feature_names = _metadata.get("feature_columns")
     dmatrix = xgb.DMatrix(features, feature_names=feature_names)
     pred = _booster.predict(dmatrix)

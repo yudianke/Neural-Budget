@@ -17,8 +17,6 @@ import pandas as pd
 import ray
 import xgboost as xgb
 from mlflow.tracking import MlflowClient
-from ray.train import CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
-from ray.train.xgboost import XGBoostTrainer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder
@@ -49,6 +47,24 @@ TEXT_COL = "merchant"
 LABEL_COL = "category"
 NUMERIC_COLS = ["log_amount", "day_of_week", "day_of_month"]
 CANONICAL_COLUMNS = ["date", TEXT_COL, "amount", LABEL_COL]
+
+
+@ray.remote(max_retries=2)
+def _ray_train_xgb(x_train, y_train, x_test, y_test, feature_cols, params, num_boost_round):
+    # DMatrix is not picklable — rebuild it inside the worker so sparse CSR
+    # semantics (missing != 0) match the serving path.
+    dtrain = xgb.DMatrix(x_train, label=y_train, feature_names=feature_cols)
+    deval = xgb.DMatrix(x_test, label=y_test, feature_names=feature_cols)
+    evals_result: dict = {}
+    bst = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=num_boost_round,
+        evals=[(dtrain, "train"), (deval, "eval")],
+        evals_result=evals_result,
+        verbose_eval=50,
+    )
+    return bst.save_raw(), evals_result
 
 
 def normalize_merchant(name):
@@ -203,19 +219,16 @@ def _featurize_split(train_df, test_df, config):
     x_train_text = tfidf.fit_transform(train_df["merchant_clean"])
     x_test_text = tfidf.transform(test_df["merchant_clean"])
 
-    x_train_num = train_df[NUMERIC_COLS].fillna(0).values
-    x_test_num = test_df[NUMERIC_COLS].fillna(0).values
+    x_train_num = csr_matrix(train_df[NUMERIC_COLS].fillna(0).values, dtype=np.float32)
+    x_test_num = csr_matrix(test_df[NUMERIC_COLS].fillna(0).values, dtype=np.float32)
 
-    x_train = hstack([x_train_text, csr_matrix(x_train_num)]).astype(np.float32).toarray()
-    x_test = hstack([x_test_text, csr_matrix(x_test_num)]).astype(np.float32).toarray()
+    # Keep sparse — avoids dense allocation of N×F float32 (~2 GB for 500k rows)
+    x_train = hstack([x_train_text, x_train_num], format="csr").astype(np.float32)
+    x_test = hstack([x_test_text, x_test_num], format="csr").astype(np.float32)
 
     feature_cols = [f"f{i}" for i in range(x_train.shape[1])]
-    train_pd = pd.DataFrame(x_train, columns=feature_cols)
-    train_pd["label"] = train_df["label"].values
-    test_pd = pd.DataFrame(x_test, columns=feature_cols)
-    test_pd["label"] = test_df["label"].values
 
-    return train_pd, test_pd, le, tfidf, feature_cols
+    return x_train, train_df["label"].values, x_test, test_df["label"].values, le, tfidf, feature_cols
 
 
 def _apply_row_caps(train_df, test_df, config):
@@ -260,9 +273,10 @@ def load_and_prepare(config, mode):
         )
         train_df = bootstrap_df.copy()
     else:
-        split_date = pd.to_datetime(config["split_date"])
-        train_df = bootstrap_df[bootstrap_df["date"] < split_date].copy()
-        test_df = bootstrap_df[bootstrap_df["date"] >= split_date].copy()
+        # No explicit eval_path: fall back to a chronological 80/20 split
+        split_idx = int(len(bootstrap_df) * 0.8)
+        train_df = bootstrap_df.iloc[:split_idx].copy()
+        test_df = bootstrap_df.iloc[split_idx:].copy()
         eval_resolved_path = None
 
     production_path = None
@@ -287,12 +301,16 @@ def load_and_prepare(config, mode):
             )
 
     train_df, test_df = _apply_row_caps(train_df, test_df, config)
-    train_pd, test_pd, le, tfidf, feature_cols = _featurize_split(
+    x_train, y_train, x_test, y_test, le, tfidf, feature_cols = _featurize_split(
         train_df, test_df, config
     )
     return {
-        "train_pd": train_pd,
-        "test_pd": test_pd,
+        "x_train": x_train,
+        "y_train": y_train,
+        "x_test": x_test,
+        "y_test": y_test,
+        "train_size": x_train.shape[0],
+        "test_size": x_test.shape[0],
         "label_encoder": le,
         "tfidf": tfidf,
         "feature_cols": feature_cols,
@@ -339,6 +357,9 @@ def main():
         if endpoint_url:
             os.environ["AWS_ENDPOINT_URL"] = endpoint_url
 
+    ray.init(ignore_reinit_error=True, logging_level="ERROR")
+    log(f"ray initialized: version={ray.__version__}")
+
     tracking_uri = setup_mlflow(config)
     data_path = os.environ.get("M1_RAY_DATA_PATH", config["data_path"])
     eval_path = os.environ.get("M1_RAY_EVAL_PATH", config.get("eval_path", ""))
@@ -355,217 +376,186 @@ def main():
     log(f"data_path={data_path}")
     log(f"eval_path={eval_path or None}")
     log(f"production_path={production_path}")
-    log(f"split_date={config['split_date']}")
+    log(f"eval_path={eval_path or '(80/20 chronological split)'}")
     log(f"quality_gate_macro_f1={quality_gate}")
 
-    ray.init(ignore_reinit_error=True, logging_level="ERROR")
-    try:
-        config = dict(config)
-        config["data_path"] = data_path
-        if eval_path:
-            config["eval_path"] = eval_path
-        if production_path:
-            config["production_path"] = production_path
-        prepared = load_and_prepare(config, args.mode)
-        train_pd = prepared["train_pd"]
-        test_pd = prepared["test_pd"]
-        le = prepared["label_encoder"]
-        tfidf = prepared["tfidf"]
-        feature_cols = prepared["feature_cols"]
-        resolved_data_path = prepared["resolved_bootstrap_path"]
-        resolved_eval_path = prepared["resolved_eval_path"]
-        resolved_production_path = prepared["resolved_production_path"]
-        production_rows = prepared["production_rows"]
-        num_classes = len(le.classes_)
+    config = dict(config)
+    config["data_path"] = data_path
+    if eval_path:
+        config["eval_path"] = eval_path
+    if production_path:
+        config["production_path"] = production_path
 
-        train_ds = ray.data.from_pandas(train_pd)
-        valid_ds = ray.data.from_pandas(test_pd)
+    prepared = load_and_prepare(config, args.mode)
+    x_train   = prepared["x_train"]
+    y_train   = prepared["y_train"]
+    x_test    = prepared["x_test"]
+    y_test    = prepared["y_test"]
+    le        = prepared["label_encoder"]
+    tfidf     = prepared["tfidf"]
+    feature_cols          = prepared["feature_cols"]
+    resolved_data_path    = prepared["resolved_bootstrap_path"]
+    resolved_eval_path    = prepared["resolved_eval_path"]
+    resolved_production_path = prepared["resolved_production_path"]
+    production_rows       = prepared["production_rows"]
+    num_classes = len(le.classes_)
 
-        params = {
-            "objective": "multi:softprob",
-            "num_class": num_classes,
-            "max_depth": config["model"]["max_depth"],
-            "learning_rate": config["model"]["learning_rate"],
-            "eval_metric": "mlogloss",
-            "tree_method": "hist",
-        }
+    log(f"training: train={x_train.shape[0]:,} rows  eval={x_test.shape[0]:,} rows  features={x_train.shape[1]}")
 
-        trainer = XGBoostTrainer(
-            label_column="label",
-            params=params,
-            num_boost_round=config["model"]["n_estimators"],
-            scaling_config=ScalingConfig(num_workers=1, use_gpu=False),
-            datasets={"train": train_ds, "valid": valid_ds},
-            run_config=RunConfig(
-                name="m1_ray_xgb",
-                storage_path=config["checkpoint_dir"],
-                checkpoint_config=CheckpointConfig(
-                    num_to_keep=2,
-                    checkpoint_frequency=50,
-                    checkpoint_at_end=True,
-                ),
-                failure_config=FailureConfig(max_failures=2),
-            ),
+    params = {
+        "objective":        "multi:softprob",
+        "num_class":        num_classes,
+        "max_depth":        config["model"]["max_depth"],
+        "learning_rate":    config["model"]["learning_rate"],
+        "subsample":        float(config["model"].get("subsample", 1.0)),
+        "colsample_bytree": float(config["model"].get("colsample_bytree", 1.0)),
+        "min_child_weight": int(config["model"].get("min_child_weight", 1)),
+        "gamma":            float(config["model"].get("gamma", 0.0)),
+        "eval_metric":      "mlogloss",
+        "tree_method":      "hist",
+        "nthread":          -1,
+    }
+
+    with mlflow.start_run() as run:
+        mlflow.log_params({
+            "mode":                    args.mode,
+            "model_type":              "xgboost_sparse",
+            "data_path":               data_path,
+            "resolved_data_path":      resolved_data_path,
+            "eval_path":               eval_path or "",
+            "resolved_eval_path":      resolved_eval_path or "",
+            "production_path":         production_path or "",
+            "resolved_production_path": resolved_production_path or "",
+            "production_rows":         production_rows,
+            "feedback_weight":         int(config.get("feedback_weight", 5)),
+            "production_rows_weighted": production_rows * int(config.get("feedback_weight", 5)),
+            "eval_split":              eval_path or "80/20_chronological",
+            "n_estimators":            config["model"]["n_estimators"],
+            "max_depth":               config["model"]["max_depth"],
+            "learning_rate":           config["model"]["learning_rate"],
+            "subsample":               params["subsample"],
+            "colsample_bytree":        params["colsample_bytree"],
+            "min_child_weight":        params["min_child_weight"],
+            "gamma":                   params["gamma"],
+            "tfidf_ngram_min":         config["tfidf"]["ngram_min"],
+            "tfidf_ngram_max":         config["tfidf"]["ngram_max"],
+            "tfidf_max_features":      config["tfidf"]["max_features"],
+            "quality_gate_macro_f1":   quality_gate,
+            "python_version":          platform.python_version(),
+            "platform":                platform.platform(),
+            "ray_version":             ray.__version__,
+        })
+
+        start = time.time()
+        raw_bytes, evals_result = ray.get(
+            _ray_train_xgb.remote(
+                x_train, y_train, x_test, y_test, feature_cols, params,
+                config["model"]["n_estimators"],
+            )
         )
+        bst = xgb.Booster()
+        bst.load_model(bytearray(raw_bytes))
+        train_time = time.time() - start
 
-        with mlflow.start_run() as run:
-            mlflow.log_params(
-                {
-                    "mode": args.mode,
-                    "model_type": "xgboost_ray",
-                    "data_path": data_path,
-                    "resolved_data_path": resolved_data_path,
-                    "eval_path": eval_path or "",
-                    "resolved_eval_path": resolved_eval_path or "",
-                    "production_path": production_path or "",
-                    "resolved_production_path": resolved_production_path or "",
-                    "production_rows": production_rows,
-                    "feedback_weight": int(config.get("feedback_weight", 5)),
-                    "production_rows_weighted": production_rows * int(config.get("feedback_weight", 5)),
-                    "split_date": str(config["split_date"]),
-                    "n_estimators": config["model"]["n_estimators"],
-                    "max_depth": config["model"]["max_depth"],
-                    "learning_rate": config["model"]["learning_rate"],
-                    "tfidf_ngram_min": config["tfidf"]["ngram_min"],
-                    "tfidf_ngram_max": config["tfidf"]["ngram_max"],
-                    "tfidf_max_features": config["tfidf"]["max_features"],
-                    "checkpoint_storage": config["checkpoint_dir"],
-                    "fault_tolerance": "FailureConfig(max_failures=2)",
-                    "quality_gate_macro_f1": quality_gate,
-                    "ray_version": ray.__version__,
-                    "python_version": platform.python_version(),
-                    "platform": platform.platform(),
-                }
+        deval = xgb.DMatrix(x_test, label=y_test, feature_names=feature_cols)
+        del x_train, x_test
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.ubj")
+            bst.save_model(model_path)
+
+            pred_proba = bst.predict(deval)
+            if pred_proba.ndim == 1:
+                y_pred = pred_proba.astype(int)
+            else:
+                y_pred = np.argmax(pred_proba, axis=1).astype(int)
+
+            macro_f1    = f1_score(y_test, y_pred, average="macro",    zero_division=0)
+            weighted_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+            accuracy    = accuracy_score(y_test, y_pred)
+
+            mlflow.log_metrics({
+                "macro_f1":          macro_f1,
+                "weighted_f1":       weighted_f1,
+                "accuracy":          accuracy,
+                "train_time_seconds": train_time,
+                "train_size":        prepared["train_size"],
+                "test_size":         prepared["test_size"],
+                "num_classes":       num_classes,
+            })
+
+            present = np.unique(np.concatenate([y_test, y_pred]))
+            report = classification_report(
+                y_test, y_pred,
+                labels=present,
+                target_names=le.inverse_transform(present),
+                output_dict=True,
+                zero_division=0,
+            )
+            for cat, metrics in report.items():
+                if isinstance(metrics, dict):
+                    safe = cat.replace(" ", "_").replace("/", "_")
+                    mlflow.log_metric(f"f1_{safe}", metrics["f1-score"])
+
+            run_safeguarding_checks(
+                y_test=y_test, y_pred=y_pred, le=le, tfidf=tfidf,
+                feature_cols=feature_cols,
+                pred_proba=pred_proba if pred_proba.ndim > 1 else None,
+                data_path=resolved_data_path,
             )
 
-            start = time.time()
-            result = trainer.fit()
-            train_time = time.time() - start
+            mlflow.xgboost.log_model(bst, "model")
 
-            with result.checkpoint.as_directory() as ckpt_dir:
-                model_path = os.path.join(ckpt_dir, "model.ubj")
-                if not os.path.exists(model_path):
-                    model_path = os.path.join(ckpt_dir, "model.json")
+            bundle_dir = Path(tmpdir) / "bundle"
+            save_bundle(bundle_dir, model_path, tfidf, le, feature_cols)
+            mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
 
-                bst = xgb.Booster()
-                bst.load_model(model_path)
+            absolute_passed = macro_f1 >= quality_gate
+            client_for_gate = MlflowClient()
+            prev_version, prev_metric = get_latest_production_metric(registered_model_name, "macro_f1")
+            log(f"previous version: v{prev_version} macro_f1={prev_metric}")
 
-                x_test_df = test_pd.drop("label", axis=1)
-                y_test = test_pd["label"].values
-                dtest = xgb.DMatrix(x_test_df.values, feature_names=list(x_test_df.columns))
-                pred_proba = bst.predict(dtest)
-                if pred_proba.ndim == 1:
-                    y_pred = pred_proba.astype(int)
-                else:
-                    y_pred = np.argmax(pred_proba, axis=1).astype(int)
+            prev_per_cat_f1 = get_per_category_f1_from_run(client_for_gate, registered_model_name)
+            category_gate_passed, regressed_cats = check_category_regression(
+                report=report,
+                prev_per_cat_f1=prev_per_cat_f1,
+                regression_threshold=0.02,
+            )
+            if not category_gate_passed:
+                log(f"CATEGORY REGRESSION GATE FAILED: {regressed_cats}")
+            else:
+                log(f"category regression gate passed (checked {len(prev_per_cat_f1)} categories)")
 
-                macro_f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
-                weighted_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-                accuracy = accuracy_score(y_test, y_pred)
+            do_register, reason = should_register(
+                mode=args.mode,
+                current_metric=macro_f1,
+                previous_metric=prev_metric,
+                higher_is_better=True,
+                absolute_gate_passed=absolute_passed,
+                category_gate_passed=category_gate_passed,
+                prefix="M1-RAY",
+            )
 
-                mlflow.log_metrics(
-                    {
-                        "macro_f1": macro_f1,
-                        "weighted_f1": weighted_f1,
-                        "accuracy": accuracy,
-                        "train_time_seconds": train_time,
-                        "train_size": len(train_pd),
-                        "test_size": len(test_pd),
-                        "num_classes": num_classes,
-                    }
-                )
+            mlflow.set_tag("quality_gate_metric", "macro_f1")
+            mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
+            mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
+            mlflow.set_tag("regressed_categories", ",".join(regressed_cats) if regressed_cats else "none")
+            mlflow.set_tag("registered", str(do_register).lower())
+            mlflow.set_tag("register_reason", reason)
+            mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")
+            mlflow.set_tag("mode", args.mode)
 
-                present = np.unique(np.concatenate([y_test, y_pred]))
-                report = classification_report(
-                    y_test,
-                    y_pred,
-                    labels=present,
-                    target_names=le.inverse_transform(present),
-                    output_dict=True,
-                    zero_division=0,
-                )
-                for cat, metrics in report.items():
-                    if isinstance(metrics, dict):
-                        safe = cat.replace(" ", "_").replace("/", "_")
-                        mlflow.log_metric(f"f1_{safe}", metrics["f1-score"])
+            if do_register:
+                client = MlflowClient()
+                mv = register_model_version(client, registered_model_name, run.info.run_id, "bundle")
+                log(f"REGISTERED v{mv.version} — {reason}")
+            else:
+                log(f"NOT REGISTERED — {reason}")
 
-                # Safeguarding: fairness, explainability, robustness, privacy, accountability
-                run_safeguarding_checks(
-                    y_test=y_test,
-                    y_pred=y_pred,
-                    le=le,
-                    tfidf=tfidf,
-                    feature_cols=feature_cols,
-                    pred_proba=pred_proba if pred_proba.ndim > 1 else None,
-                    data_path=resolved_data_path,
-                )
+            log(f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
+            log(f"done | run_id={run.info.run_id}")
 
-                mlflow.xgboost.log_model(bst, "model")
-
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    bundle_dir = Path(tmpdir) / "bundle"
-                    save_bundle(bundle_dir, model_path, tfidf, le, feature_cols)
-                    mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
-
-                absolute_passed = macro_f1 >= quality_gate
-                client_for_gate = MlflowClient()
-                prev_version, prev_metric = get_latest_production_metric(
-                    registered_model_name, "macro_f1"
-                )
-                log(f"previous version: v{prev_version} macro_f1={prev_metric}")
-
-                # --- Per-category regression gate (AGENTS.md: < 2% relative drop) ---
-                prev_per_cat_f1 = get_per_category_f1_from_run(
-                    client_for_gate, registered_model_name
-                )
-                category_gate_passed, regressed_cats = check_category_regression(
-                    report=report,
-                    prev_per_cat_f1=prev_per_cat_f1,
-                    regression_threshold=0.02,
-                )
-                if not category_gate_passed:
-                    log(f"CATEGORY REGRESSION GATE FAILED: {regressed_cats}")
-                else:
-                    log(f"category regression gate passed (checked {len(prev_per_cat_f1)} categories)")
-
-                do_register, reason = should_register(
-                    mode=args.mode,
-                    current_metric=macro_f1,
-                    previous_metric=prev_metric,
-                    higher_is_better=True,
-                    absolute_gate_passed=absolute_passed,
-                    category_gate_passed=category_gate_passed,
-                    prefix="M1-RAY",
-                )
-
-                mlflow.set_tag("quality_gate_metric", "macro_f1")
-                mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
-                mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
-                mlflow.set_tag(
-                    "regressed_categories",
-                    ",".join(regressed_cats) if regressed_cats else "none",
-                )
-                mlflow.set_tag("registered", str(do_register).lower())
-                mlflow.set_tag("register_reason", reason)
-                mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")
-                mlflow.set_tag("mode", args.mode)
-
-                if do_register:
-                    client = MlflowClient()
-                    mv = register_model_version(
-                        client, registered_model_name, run.info.run_id, "bundle"
-                    )
-                    log(f"REGISTERED v{mv.version} — {reason}")
-                else:
-                    log(f"NOT REGISTERED — {reason}")
-
-                log(
-                    f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, "
-                    f"weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s"
-                )
-                log(f"done | run_id={run.info.run_id}")
-    finally:
-        ray.shutdown()
+    ray.shutdown()
 
 
 if __name__ == "__main__":
