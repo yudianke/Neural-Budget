@@ -87,6 +87,45 @@ def _normalize_bootstrap_df(path):
     return df.sort_values("date").reset_index(drop=True), local_path
 
 
+def _normalize_processed_categorization_df(path, source_name="bootstrap"):
+    local_path = resolve_path(path, "M1-RAY")
+    df = pd.read_csv(local_path)
+    df = df.rename(
+        columns={
+            "project_category": LABEL_COL,
+            "payee_name": TEXT_COL,
+            "imported_payee": TEXT_COL,
+        }
+    )
+    df.columns = [c.strip().lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    df[LABEL_COL] = df[LABEL_COL].astype(str).str.strip()
+    df[TEXT_COL] = df[TEXT_COL].astype(str).str.strip()
+    df = df.dropna(subset=["date", "amount", LABEL_COL, TEXT_COL])
+    df = df[df[LABEL_COL] != ""]
+    df = df[df[TEXT_COL] != ""]
+    df = df[CANONICAL_COLUMNS].copy()
+    df["source"] = source_name
+    return df.sort_values("date").reset_index(drop=True), local_path
+
+
+def _normalize_any_supervised_df(path, source_name="bootstrap"):
+    local_path = resolve_path(path, "M1-RAY")
+    head = pd.read_csv(local_path, nrows=5)
+    cols = {c.strip().lower() for c in head.columns}
+    if {"debit amount", "credit amount", "category"} & set(head.columns):
+        return _normalize_bootstrap_df(path)
+    if {"date", "merchant", "amount"} <= cols and (
+        "project_category" in cols or "category" in cols
+    ):
+        return _normalize_processed_categorization_df(path, source_name=source_name)
+    raise ValueError(
+        f"Unsupported M1 supervised dataset schema for {local_path}. "
+        "Expected either moneydata-style debit/credit export or processed categorization CSV."
+    )
+
+
 def _normalize_feedback_df(path):
     local_path = resolve_path(path, "M1-RAY")
     if local_path.endswith(".jsonl"):
@@ -167,8 +206,8 @@ def _featurize_split(train_df, test_df, config):
     x_train_num = train_df[NUMERIC_COLS].fillna(0).values
     x_test_num = test_df[NUMERIC_COLS].fillna(0).values
 
-    x_train = hstack([x_train_text, csr_matrix(x_train_num)]).toarray()
-    x_test = hstack([x_test_text, csr_matrix(x_test_num)]).toarray()
+    x_train = hstack([x_train_text, csr_matrix(x_train_num)]).astype(np.float32).toarray()
+    x_test = hstack([x_test_text, csr_matrix(x_test_num)]).astype(np.float32).toarray()
 
     feature_cols = [f"f{i}" for i in range(x_train.shape[1])]
     train_pd = pd.DataFrame(x_train, columns=feature_cols)
@@ -179,11 +218,52 @@ def _featurize_split(train_df, test_df, config):
     return train_pd, test_pd, le, tfidf, feature_cols
 
 
+def _apply_row_caps(train_df, test_df, config):
+    max_train_rows = os.environ.get("M1_RAY_MAX_TRAIN_ROWS", config.get("max_train_rows"))
+    max_eval_rows = os.environ.get("M1_RAY_MAX_EVAL_ROWS", config.get("max_eval_rows"))
+
+    train_df = train_df.copy()
+    test_df = test_df.copy()
+
+    if max_train_rows:
+        max_train_rows = int(max_train_rows)
+        if len(train_df) > max_train_rows:
+            train_df = (
+                train_df.sample(n=max_train_rows, random_state=42)
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            log(f"sampled training rows to {len(train_df):,}")
+
+    if max_eval_rows:
+        max_eval_rows = int(max_eval_rows)
+        if len(test_df) > max_eval_rows:
+            test_df = (
+                test_df.sample(n=max_eval_rows, random_state=42)
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            log(f"sampled eval rows to {len(test_df):,}")
+
+    return train_df, test_df
+
+
 def load_and_prepare(config, mode):
-    bootstrap_df, bootstrap_path = _normalize_bootstrap_df(config["data_path"])
-    split_date = pd.to_datetime(config["split_date"])
-    train_df = bootstrap_df[bootstrap_df["date"] < split_date].copy()
-    test_df = bootstrap_df[bootstrap_df["date"] >= split_date].copy()
+    bootstrap_df, bootstrap_path = _normalize_any_supervised_df(
+        config["data_path"], source_name="bootstrap"
+    )
+
+    eval_path = config.get("eval_path") or os.environ.get("M1_RAY_EVAL_PATH")
+    if eval_path:
+        test_df, eval_resolved_path = _normalize_any_supervised_df(
+            eval_path, source_name="explicit_eval"
+        )
+        train_df = bootstrap_df.copy()
+    else:
+        split_date = pd.to_datetime(config["split_date"])
+        train_df = bootstrap_df[bootstrap_df["date"] < split_date].copy()
+        test_df = bootstrap_df[bootstrap_df["date"] >= split_date].copy()
+        eval_resolved_path = None
 
     production_path = None
     production_rows = 0
@@ -206,6 +286,7 @@ def load_and_prepare(config, mode):
                 f"from {production_path}"
             )
 
+    train_df, test_df = _apply_row_caps(train_df, test_df, config)
     train_pd, test_pd, le, tfidf, feature_cols = _featurize_split(
         train_df, test_df, config
     )
@@ -216,6 +297,7 @@ def load_and_prepare(config, mode):
         "tfidf": tfidf,
         "feature_cols": feature_cols,
         "resolved_bootstrap_path": bootstrap_path,
+        "resolved_eval_path": eval_resolved_path,
         "resolved_production_path": production_path,
         "production_rows": production_rows,
     }
@@ -259,6 +341,7 @@ def main():
 
     tracking_uri = setup_mlflow(config)
     data_path = os.environ.get("M1_RAY_DATA_PATH", config["data_path"])
+    eval_path = os.environ.get("M1_RAY_EVAL_PATH", config.get("eval_path", ""))
     production_path = (
         os.environ.get("M1_RAY_PRODUCTION_PATH")
         or (config.get("production_path") if args.mode == "retrain" else None)
@@ -270,6 +353,7 @@ def main():
 
     log(f"mode={args.mode} tracking_uri={tracking_uri}")
     log(f"data_path={data_path}")
+    log(f"eval_path={eval_path or None}")
     log(f"production_path={production_path}")
     log(f"split_date={config['split_date']}")
     log(f"quality_gate_macro_f1={quality_gate}")
@@ -278,6 +362,8 @@ def main():
     try:
         config = dict(config)
         config["data_path"] = data_path
+        if eval_path:
+            config["eval_path"] = eval_path
         if production_path:
             config["production_path"] = production_path
         prepared = load_and_prepare(config, args.mode)
@@ -287,6 +373,7 @@ def main():
         tfidf = prepared["tfidf"]
         feature_cols = prepared["feature_cols"]
         resolved_data_path = prepared["resolved_bootstrap_path"]
+        resolved_eval_path = prepared["resolved_eval_path"]
         resolved_production_path = prepared["resolved_production_path"]
         production_rows = prepared["production_rows"]
         num_classes = len(le.classes_)
@@ -328,6 +415,8 @@ def main():
                     "model_type": "xgboost_ray",
                     "data_path": data_path,
                     "resolved_data_path": resolved_data_path,
+                    "eval_path": eval_path or "",
+                    "resolved_eval_path": resolved_eval_path or "",
                     "production_path": production_path or "",
                     "resolved_production_path": resolved_production_path or "",
                     "production_rows": production_rows,

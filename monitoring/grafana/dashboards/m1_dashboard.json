@@ -220,14 +220,18 @@
     {
       "id": 9,
       "title": "Predictions by Category",
-      "type": "barchart",
+      "type": "bargauge",
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
       "options": {
         "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
         "legend": { "displayMode": "none" },
-        "tooltip": { "mode": "single" },
-        "xTickLabelRotation": 0,
-        "barRadius": 0.05
+        "tooltip": { "mode": "single" }
       },
       "fieldConfig": {
         "defaults": {
@@ -236,16 +240,24 @@
         }
       },
       "targets": [{
-        "expr": "sort_desc(sum by (predicted_category) (m1_predictions_total))",
-        "legendFormat": "{{predicted_category}}"
+        "expr": "sort_desc(sum by (predicted_category) (increase(m1_predictions_total[$__range])))",
+        "legendFormat": "{{predicted_category}}",
+        "instant": true
       }]
     },
     {
       "id": 10,
       "title": "Prediction Confidence Distribution",
-      "type": "histogram",
+      "type": "bargauge",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
         "legend": { "displayMode": "none" },
         "tooltip": { "mode": "single" },
         "fillOpacity": 80,
@@ -258,9 +270,9 @@
         }
       },
       "targets": [{
-        "expr": "sum(rate(m1_prediction_confidence_bucket[5m])) by (le)",
+        "expr": "sum(increase(m1_prediction_confidence_bucket[$__range])) by (le)",
         "legendFormat": "{{le}}",
-        "format": "heatmap"
+        "instant": true
       }]
     },
     {
