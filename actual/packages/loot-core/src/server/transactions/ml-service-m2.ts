@@ -1,7 +1,7 @@
 // @ts-strict-ignore
-import * as connection from '#platform/server/connection';
 import { logger } from '#platform/server/log';
 import { all, first, updateTransaction } from '#server/db';
+import { app as mainApp } from '#server/main-app';
 
 type TransForAnomalyScoring = {
   id?: string;
@@ -258,11 +258,15 @@ export async function persistAnomalyResult(
     anomaly_dismissed: 0,
   });
 
-  // Notify frontend so the live query re-fetches and shows the badge immediately
-  connection.send('sync-event', {
+  // Emit through the canonical sync pipeline (same path every other sync
+  // event uses — applyMessages fires this automatically during the write
+  // above, so this is belt-and-suspenders for environments where the
+  // inner emit doesn't reach the client reliably).
+  mainApp.events.emit('sync', {
     type: 'applied',
     tables: ['transactions'],
   });
+  logger.info('[M2] anomaly result persisted + sync emitted for', transId);
 }
 
 /**
