@@ -287,8 +287,6 @@ export function ForecastCard({
 
   const now = new Date();
   const nowLabel = now.toLocaleString('default', {month: 'long', year: 'numeric'});
-  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const nextMonthLabel = nextMonthDate.toLocaleString('default', {month: 'long', year: 'numeric'});
 
   async function handleApplyAsBudgets() {
     if (!data?.forecasts) return;
@@ -425,7 +423,7 @@ export function ForecastCard({
                     flex: 1,
                   }}
                 >
-                  <Trans>No budgets set for {nextMonthLabel}</Trans>
+                  <Trans>No budgets set for {nowLabel}</Trans>
                 </Text>
                 <Button
                   variant="bare"

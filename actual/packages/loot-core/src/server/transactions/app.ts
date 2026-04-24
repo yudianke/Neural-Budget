@@ -242,26 +242,28 @@ async function getCategoryPredictions() {
     now.getMonth() + 1,
   ).padStart(2, '0')}`;
 
-  // M3 forecasts NEXT month's spend, so budget targets should be read from
-  // next month's sheet — not the current month's sheet.
-  const nextMonth = monthUtils.addMonths(currentMonth, 1);
+  // M3 forecasts the CURRENT in-progress month's spend. Feature rows exclude
+  // the current month from lag history (partial month would bias lag_1 low),
+  // so the model's target is the month immediately after the last complete
+  // month in history — i.e. the current month. Budget targets for comparison
+  // are therefore read from the current month's sheet.
+  const targetMonth = currentMonth;
 
   const {data: categoryRows} = await aqlQuery(
     q('categories').select(['id', 'name']),
   );
 
-  const nextMonthSheetName = monthUtils.sheetForMonth(nextMonth);
+  const targetSheetName = monthUtils.sheetForMonth(targetMonth);
 
-  // Build budgetMap keyed by category id → next-month budgeted amount (cents).
-  // Only reads the next-month sheet — no fallback to current month.
-  // This ensures gap_to_budget is null (and the "Use forecasts as budgets" banner
-  // is shown) when the user hasn't budgeted next month yet, rather than silently
-  // borrowing the current month's budget and hiding the actionable banner.
+  // Build budgetMap keyed by category id → current-month budgeted amount (cents).
+  // When the user has not budgeted the current month, gap_to_budget stays null
+  // (and the "Use forecasts as budgets" banner fires), prompting them to set
+  // one using the forecast.
   const budgetMap = new Map<string, number>();
 
   for (const cat of categoryRows) {
-    const nextVal = sheet.getCellValue(nextMonthSheetName, `budget-${cat.id}`);
-    budgetMap.set(cat.id, nextVal === '' ? 0 : Number(nextVal || 0));
+    const val = sheet.getCellValue(targetSheetName, `budget-${cat.id}`);
+    budgetMap.set(cat.id, val === '' ? 0 : Number(val || 0));
   }
   if (!data || data.length === 0) {
     return {forecasts: [], model_name: 'm3-forecast'};
@@ -372,9 +374,15 @@ async function getCategoryPredictions() {
       return Math.sqrt(variance);
     };
 
-    const month_num = monthToNumber(latestMonth);
+    // Calendar features describe the TARGET month (the one being forecast),
+    // not the last history month — matches training's `_build_supervised_rows`
+    // where `month_num = months[i][5:7]` is the target month's number.
+    // Off-by-one here silently skews seasonality priors and is especially bad
+    // at year boundaries (Dec → Jan).
+    const forecastMonth = monthUtils.addMonths(latestMonth, 1);
+    const month_num = monthToNumber(forecastMonth);
     const quarter = quarterFromMonth(month_num);
-    const year = Number(latestMonth.slice(0, 4));
+    const year = Number(forecastMonth.slice(0, 4));
     const is_q4 = [10, 11, 12].includes(month_num) ? 1 : 0;
     const {month_sin, month_cos} = monthTrig(month_num);
 
@@ -511,7 +519,8 @@ async function applyForecastsAsBudgets({
 
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const targetMonth = monthUtils.addMonths(currentMonth, 1);
+  // Forecast target is the current in-progress month (see getCategoryPredictions).
+  const targetMonth = currentMonth;
   const targetSheetName = monthUtils.sheetForMonth(targetMonth);
 
   // Load all categories so we can match by name (normalized)
