@@ -249,7 +249,11 @@ def forecast_from_features(request: ForecastFeaturesRequest):
     rows_df = pd.DataFrame([row.model_dump() for row in request.rows])
     categories = rows_df["project_category"].tolist()
 
-    X = pd.get_dummies(rows_df.drop(columns=["project_category"]), dummy_na=True)
+    # Keep project_category in the frame so get_dummies produces the
+    # project_category_<value> one-hot columns that training expects.
+    # Dropping it here makes all those dummies zero after reindex, so the
+    # model becomes category-blind at inference.
+    X = pd.get_dummies(rows_df, dummy_na=True)
     X = X.reindex(columns=_feature_cols, fill_value=0)
 
     preds = _model.predict(X)
