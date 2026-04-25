@@ -301,6 +301,9 @@ def load_and_prepare(config, mode):
             )
 
     train_df, test_df = _apply_row_caps(train_df, test_df, config)
+    # Preserve raw eval df (date, merchant, amount, category) before featurization
+    # so training can upload it as an MLflow artifact for serving-side offline eval.
+    raw_test_df = test_df[["date", TEXT_COL, "amount", LABEL_COL]].copy()
     x_train, y_train, x_test, y_test, le, tfidf, feature_cols = _featurize_split(
         train_df, test_df, config
     )
@@ -314,6 +317,7 @@ def load_and_prepare(config, mode):
         "label_encoder": le,
         "tfidf": tfidf,
         "feature_cols": feature_cols,
+        "raw_test_df": raw_test_df,
         "resolved_bootstrap_path": bootstrap_path,
         "resolved_eval_path": eval_resolved_path,
         "resolved_production_path": production_path,
@@ -509,6 +513,17 @@ def main():
             bundle_dir = Path(tmpdir) / "bundle"
             save_bundle(bundle_dir, model_path, tfidf, le, feature_cols)
             mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
+
+            # Upload eval holdout for serving-side offline evaluation gate.
+            # The serving layer downloads this at model load time and runs
+            # accuracy / per-category F1 checks before activating the model.
+            eval_holdout_dir = Path(tmpdir) / "eval_data"
+            eval_holdout_dir.mkdir(exist_ok=True)
+            raw_test_df = prepared["raw_test_df"]
+            eval_holdout_path = eval_holdout_dir / "eval_holdout.csv"
+            raw_test_df.to_csv(eval_holdout_path, index=False)
+            mlflow.log_artifacts(str(eval_holdout_dir), artifact_path="eval_data")
+            log(f"uploaded eval holdout ({len(raw_test_df):,} rows) to eval_data/eval_holdout.csv")
 
             absolute_passed = macro_f1 >= quality_gate
             client_for_gate = MlflowClient()
