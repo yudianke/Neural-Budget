@@ -39,7 +39,17 @@ def app_client(mock_real_model):
             )
             mock_real_model.log_feedback.return_value = 1
 
-            # Force re-import of server with mocks in place
+            # Force re-import of server with mocks in place. Each pytest test
+            # using this fixture re-executes server.py at module level, which
+            # re-creates Counter/Gauge/Histogram instances against the global
+            # prometheus REGISTRY. Unregister m1-prefixed collectors first to
+            # avoid `Duplicated timeseries in CollectorRegistry`.
+            from prometheus_client import REGISTRY
+            for collector in list(REGISTRY._collector_to_names.keys()):
+                names = REGISTRY._collector_to_names.get(collector, set())
+                if any(n.startswith("m1_") for n in names):
+                    REGISTRY.unregister(collector)
+
             if "server" in sys.modules:
                 del sys.modules["server"]
 

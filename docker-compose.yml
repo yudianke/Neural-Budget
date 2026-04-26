@@ -40,7 +40,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M1_REGISTERED_MODEL_NAME: "m1-ray-categorization"
       M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
     volumes:
@@ -66,7 +66,7 @@ services:
     container_name: retrain-daemon
     shm_size: "2gb"
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M1_SERVING_URL: "http://m1-serving:8001"
       M1_SERVING_CONTAINER: "m1-serving"
       M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
@@ -101,7 +101,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M2_REGISTERED_MODEL_NAME: "m2-anomaly"
       M2_CONTAMINATION: "${M2_CONTAMINATION:-0.05}"
       M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
@@ -133,7 +133,7 @@ services:
     image: m2-retrain-daemon:latest
     container_name: m2-retrain-daemon
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M2_SERVING_URL: "http://m2-serving:8003"
       M2_FEEDBACK_LOG_PATH: "/data/feedback/m2_feedback.jsonl"
       M2_DAEMON_STATE_PATH: "/data/feedback/m2_daemon_state.json"
@@ -168,7 +168,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M3_REGISTERED_MODEL: "m3-forecast"
       M3_FORECAST_LOG_PATH: "/data/m3_feedback/m3_forecasts.jsonl"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
@@ -197,7 +197,7 @@ services:
     image: m3-monitor-daemon:latest
     container_name: m3-monitor-daemon
     environment:
-      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M3_SERVING_URL: "http://m3-serving:8002"
       M3_STATE_PATH: "/data/m3_state/monitor_state.json"
       M3_RETRAIN_SCRIPT: "/app/training/m3/run_m3_retrain.sh"
