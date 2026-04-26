@@ -1,4 +1,5 @@
-data_path: "/data/moneydata.csv"
+data_path: "swift://neural-budget-data-proj16/processed/categorization_train.csv"
+eval_path: "swift://neural-budget-data-proj16/processed/categorization_eval.csv"
 production_path: ""
 mlflow_tracking_uri: "http://129.114.26.214:8000"
 experiment_name: "m1-categorization-ray"
@@ -15,8 +16,7 @@ model:
   max_depth: 6
   learning_rate: 0.1
 
-split_date: "2021-01-01"
-feedback_weight: 10   # repeat each feedback row N times to amplify user corrections
+feedback_weight: 10
 checkpoint_dir: "s3://proj16-mlflow-artifacts/ray-checkpoints"
 
 s3:

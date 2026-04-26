@@ -52,28 +52,38 @@ Wait ~3 minutes for Vite build, then open **https://\<VM-IP\>:3001** (accept the
 Predicts the spending category from payee name + amount when a transaction is imported. Auto-fills the category if confidence ≥ 0.6; shows a ranked top-3 suggestion dropdown if < 0.6.
 
 ### Model
-- **Features:** TF-IDF character n-grams (n=3–5, 500 features) on payee name, log-amount, day-of-week, day-of-month, account type, historical majority category for payee
-- **Algorithm:** XGBoost classifier (also Ray Train variant for distributed training)
-- **Training data:** MoneyData (6,500+ real UK bank transactions, 2015–2022) + synthetic transactions generated from BLS CES household survey data
+- **Features:** TF-IDF character n-grams (char_wb, config-driven range e.g. 1–3 with 1000 features for the baseline config) on normalized merchant, plus `log_amount`, `day_of_week`, `day_of_month`
+- **Algorithm:** XGBoost classifier, trained inside a Ray `@ray.remote` task so the orchestration layer matches the production retrain-daemon. Sparse CSR features are preserved end-to-end (missing-value semantics intact between train and serve)
+- **Training data:** Synthetic categorization CSV in Chameleon Swift (`neural-budget-data-proj16/processed/categorization_train.csv` ≈ 1.35M rows, `categorization_eval.csv` ≈ 339k rows). The older MoneyData sklearn baseline still lives under `training/m1/` as a fallback but is not retrained.
 - **Output:** `predicted_category`, `confidence`, `top_3_suggestions`, `auto_fill` flag
 
 ### Training
 
 ```bash
-# Local
-cd training/m1
-python3 train_m1.py --config config_xgb.yaml
+# Local (requires ray[train], xgboost, mlflow, boto3 on PATH)
+MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
+AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret> \
+AWS_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480 \
+MLFLOW_S3_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480 \
+python3 training/m1_ray/train_m1_ray.py \
+  --mode bootstrap --config training/m1_ray/config_m1_ray.yaml
 
-# Docker
-docker build -f Dockerfile.m1 -t m1-training .
-docker run --rm \
-  -e MLFLOW_TRACKING_URI=http://129.114.26.214:8000 \
-  -e AWS_ACCESS_KEY_ID=<key> \
-  -e AWS_SECRET_ACCESS_KEY=<secret> \
-  m1-training
+# Docker (production retrain-daemon image)
+docker compose up -d --build retrain-daemon
+docker exec <retrain-daemon-container> \
+  python3 /app/training/m1_ray/train_m1_ray.py \
+  --mode bootstrap --config /app/training/m1_ray/config_m1_ray.yaml
+
+# Hyperparam sweep across config_m1_ray{,_v2,_v3,_v4}.yaml
+bash training/m1_ray/run_hypersearch.sh
 ```
 
-Promotion gate: new model must improve macro-F1 without >2% regression on the top-20 categories, otherwise auto-rollback.
+Promotion gates (all must pass to register):
+1. Absolute gate — macro-F1 ≥ `quality_gate_macro_f1` (default 0.65).
+2. Per-category regression — no category's F1 may drop by more than 2% relative vs the previously registered version.
+3. Improvement — bootstrap mode skips improvement check; retrain mode requires improvement over previous registered macro-F1.
+
+Failing any gate skips registration (no rollback needed — the previous version stays in place).
 
 ### Retraining
 - **Schedule:** Weekly, or immediately upon ≥ 50 user corrections
@@ -96,9 +106,11 @@ docker run -p 8001:8001 \
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Service health + loaded model version |
-| POST | `/predict` | Categorize a transaction |
+| POST | `/predict/category` | Categorize a transaction |
 | POST | `/feedback` | Log a user correction |
 | GET | `/metrics` | Prometheus metrics |
+| GET | `/metrics/feedback` | Aggregate feedback stats |
+| GET | `/metrics/feedback/since/{model_version}` | Feedback stats scoped to a specific model version (used by retrain-daemon rollback check) |
 | POST | `/admin/reload` | Hot-reload model from MLflow |
 
 **Serving variants:**
@@ -214,7 +226,9 @@ curl -X POST http://localhost:8003/admin/reload?version=1
 ## M3 — Budget Forecasting
 
 ### What it does
-Predicts next-month spending per category. Shown in the ActualBudget dashboard as a ForecastCard. Users can apply M3 forecasts as next-month budget targets with one click.
+Predicts the **current in-progress month**'s spend per category, using complete prior-month history as lag features. Shown in the ActualBudget dashboard as a ForecastCard, compared against the user's current-month budget. Users can apply the forecasts as current-month budget targets with one click when a month hasn't been budgeted yet.
+
+The current in-progress month is excluded from the lag history (a partial month would bias `lag_1` low), so the model's target is the month immediately after the last complete month — i.e. the month you're currently in.
 
 ### Model
 - **Features:** Monthly spend per category with lag features (lag_1 through lag_6), rolling mean/std over 3 and 6 months, month-of-year trig encoding (sin/cos), quarter, is_q4, history_month_count
@@ -310,9 +324,10 @@ Background batch job — no strict latency requirement. Forecasts are pre-comput
 
 ### UI Integration
 The ForecastCard in the ActualBudget dashboard shows:
-- Per-category forecast (next month) with comparison bars (forecast vs budget vs last month)
-- Gap chip: forecast minus budget target (red = over, green = under)
-- **"Use forecasts as budgets"** button — writes M3 forecasts as next-month budget targets in one click (only fills categories where budget is currently $0)
+
+- Per-category forecast (current in-progress month) with comparison bars (forecast vs current-month budget vs last month)
+- Gap chip: forecast minus current-month budget target (red = over, green = under)
+- **"Use forecasts as budgets"** button — writes M3 forecasts into the current month's budget sheet in one click (only fills categories where the current-month budget is $0). The banner fires only when the current month has no budgets set yet.
 - Refresh button to re-fetch forecasts on demand
 
 ---
@@ -404,8 +419,8 @@ Neural-Budget/
 │   ├── m2_onnx_multiworker/   # M2 Gunicorn multi-worker ONNX + feedback loop
 │   └── m3/                    # M3 forecast serving
 ├── training/
-│   ├── m1/                    # M1 XGBoost training
-│   ├── m1_ray/                # M1 Ray Train + retrain daemon
+│   ├── m1/                    # Legacy sklearn baseline (source of the m1-categorization fallback model)
+│   ├── m1_ray/                # Active M1 training: XGBoost in a @ray.remote task + retrain daemon
 │   ├── m2/                    # M2 Isolation Forest training
 │   └── m3/                    # M3 HistGB training + monitor daemon
 ├── monitoring/                # Prometheus + Grafana config

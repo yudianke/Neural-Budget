@@ -82,7 +82,7 @@
         }
       },
       "targets": [{
-        "expr": "m2_dismiss_rate",
+        "expr": "max(m2_dismiss_rate)",
         "legendFormat": "Dismiss Rate"
       }]
     },
@@ -110,28 +110,8 @@
         }
       },
       "targets": [{
-        "expr": "m2_anomaly_rate",
+        "expr": "max(m2_anomaly_rate)",
         "legendFormat": "Anomaly Rate"
-      }]
-    },
-    {
-      "id": 5,
-      "title": "Total Predictions",
-      "type": "stat",
-      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "value",
-        "graphMode": "area"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "blue" }
-        }
-      },
-      "targets": [{
-        "expr": "sum(m2_predictions_total)",
-        "legendFormat": "Total"
       }]
     },
     {
@@ -190,7 +170,7 @@
         }
       },
       "targets": [{
-        "expr": "m2_dismiss_rate",
+        "expr": "max(m2_dismiss_rate)",
         "legendFormat": "Dismiss Rate"
       }]
     },
@@ -221,8 +201,8 @@
         }
       },
       "targets": [{
-        "expr": "sum by (badge_type) (rate(m2_dismissals_total[5m]))",
-        "legendFormat": "{{badge_type}}"
+        "expr": "sum by (pid) (m2_dismiss_rate)",
+        "legendFormat": "dismiss rate (pid={{pid}})"
       }]
     },
     {
@@ -265,8 +245,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(m2_dismissals_total[5m]))",
-          "legendFormat": "Dismissals"
+          "expr": "avg(m2_dismiss_rate)",
+          "legendFormat": "Dismiss Rate"
         },
         {
           "expr": "rate(m2_confirms_total[5m])",
@@ -287,7 +267,7 @@
         }
       },
       "targets": [{
-        "expr": "m2_anomaly_rate",
+        "expr": "max(m2_anomaly_rate)",
         "legendFormat": "Anomaly Rate"
       }]
     }

@@ -187,8 +187,8 @@
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
       },
       "targets": [{
-        "expr": "rate(m3_predictions_total[5m])",
-        "legendFormat": "n={{n_categories}} categories"
+        "expr": "rate(http_requests_total{job=\"m3-serving\",handler=\"/forecast/features\"}[5m])",
+        "legendFormat": "forecast req/s"
       }]
     },
     {

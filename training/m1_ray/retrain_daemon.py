@@ -21,7 +21,7 @@ Environment variables (all have defaults):
   M1_FEEDBACK_LOG_PATH      Path to the feedback JSONL file (shared volume)
   M1_DAEMON_STATE_PATH      Path to persist daemon state JSON
   M1_RAY_CONFIG             Path to config_m1_ray.yaml
-  M1_BOOTSTRAP_DATA_PATH    Path to moneydata.csv (mounted as volume)
+  M1_BOOTSTRAP_DATA_PATH    Path to categorization_train CSV (swift:// or local; overrides config data_path)
   M1_SERVING_CONTAINER      Docker container name for m1-serving
   CHECK_INTERVAL_SECONDS    How often to poll (default 300 = 5 min)
 """
@@ -46,7 +46,7 @@ M1_SERVING_URL    = os.environ.get("M1_SERVING_URL", "http://m1-serving:8001")
 FEEDBACK_PATH     = Path(os.environ.get("M1_FEEDBACK_LOG_PATH", "/data/feedback/m1_feedback.jsonl"))
 STATE_PATH        = Path(os.environ.get("M1_DAEMON_STATE_PATH", "/data/feedback/daemon_state.json"))
 CONFIG_PATH       = os.environ.get("M1_RAY_CONFIG", "/app/training/m1_ray/config_m1_ray.yaml")
-BOOTSTRAP_PATH    = os.environ.get("M1_BOOTSTRAP_DATA_PATH", "/data/moneydata.csv")
+BOOTSTRAP_PATH    = os.environ.get("M1_BOOTSTRAP_DATA_PATH", "")
 CONTAINER_NAME    = os.environ.get("M1_SERVING_CONTAINER", "m1-serving")
 CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 MODEL_NAME        = "m1-ray-categorization"
@@ -184,9 +184,10 @@ def _run_retrain() -> bool:
     env["M1_FEEDBACK_INPUT"] = str(FEEDBACK_PATH)
     # #8: shell script reads M1_FEEDBACK_DATASET, not M1_FEEDBACK_OUTPUT
     env["M1_FEEDBACK_DATASET"] = str(FEEDBACK_PATH.parent / "m1_feedback_dataset.csv")
-    env["M1_RAY_CONFIG"] = CONFIG_PATH
-    env["M1_RAY_DATA_PATH"] = BOOTSTRAP_PATH
-    env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
+     env["M1_RAY_CONFIG"] = CONFIG_PATH
+     if BOOTSTRAP_PATH:
+         env["M1_RAY_DATA_PATH"] = BOOTSTRAP_PATH
+     env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
 
     log.info("Starting retraining...")
     try:

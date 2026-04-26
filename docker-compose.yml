@@ -72,7 +72,6 @@ services:
       M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
       M1_DAEMON_STATE_PATH: "/data/feedback/daemon_state.json"
       M1_RAY_CONFIG: "/app/training/m1_ray/config_m1_ray.yaml"
-      M1_BOOTSTRAP_DATA_PATH: "/data/moneydata.csv"
       CHECK_INTERVAL_SECONDS: "300"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
@@ -80,7 +79,6 @@ services:
       AWS_ENDPOINT_URL: "https://chi.tacc.chameleoncloud.org:7480"
     volumes:
       - feedback_data:/data/feedback
-      - ${MONEYDATA_PATH:-./training/m1/data/moneydata.csv}:/data/moneydata.csv:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - ml-net
