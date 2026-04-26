@@ -45,6 +45,12 @@ from pydantic import BaseModel, ConfigDict
 # Configuration
 # ---------------------------------------------------------------------------
 CONTAMINATION = float(os.environ.get("M2_CONTAMINATION", "0.05"))
+# IsolationForest alone over-flags ordinary transactions when contamination is
+# configured for an "expected" rate that doesn't match a given user's spend
+# distribution. To turn an IF verdict into a "spike" badge we additionally
+# require the amount to be at least M2_SPIKE_Z_THRESHOLD standard deviations
+# from the user's prior mean. Default 3σ matches the standard "outlier" cutoff.
+SPIKE_Z_THRESHOLD = float(os.environ.get("M2_SPIKE_Z_THRESHOLD", "3.0"))
 DEFAULT_FEEDBACK_LOG_PATH = "/data/feedback/m2_feedback.jsonl"
 # Committed model.onnx — used as fallback when MLflow is unreachable
 FALLBACK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
@@ -546,8 +552,19 @@ def predict_anomaly(x: M2Input):
     anomaly_score = float(raw_score[0]) if hasattr(raw_score, "__len__") else float(raw_score)
 
     is_ml_anomaly = label == -1
-    amount_spike = is_ml_anomaly and not x.duplicate_within_24h and not x.subscription_jump
-    is_anomaly = is_ml_anomaly or x.duplicate_within_24h or x.subscription_jump
+    # Gate the IF verdict on a real amount-deviation check. Without this,
+    # IF flags ordinary transactions whenever (abs_amount, mean, std,
+    # txn_index) lands in a sparse training-data region, regardless of
+    # whether the amount is actually unusual for the user.
+    z_denom = max(x.user_std_abs_amount_prior, 1.0)
+    z_score = abs(x.abs_amount - x.user_mean_abs_amount_prior) / z_denom
+    amount_spike = (
+        is_ml_anomaly
+        and z_score >= SPIKE_Z_THRESHOLD
+        and not x.duplicate_within_24h
+        and not x.subscription_jump
+    )
+    is_anomaly = amount_spike or x.duplicate_within_24h or x.subscription_jump
 
     if x.duplicate_within_24h:
         badge_type = "duplicate"

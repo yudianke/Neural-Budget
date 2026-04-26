@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
 COPY schemas.py .
 COPY real_model.py .
+COPY offline_eval.py .
 COPY mock_model.py .
 
 EXPOSE 8001

@@ -15,6 +15,7 @@ from mlflow.tracking import MlflowClient
 from scipy.sparse import csr_matrix, hstack
 
 from schemas import CategorySuggestion, M1FeedbackEntry, M1Input, M1Output
+import offline_eval
 
 TEXT_COL = "merchant"
 NUMERIC_COLS = ["log_amount", "day_of_week", "day_of_month"]
@@ -83,6 +84,8 @@ _model_version = None
 _pipeline = None
 _use_fallback = False
 _fallback_mode = None
+_last_eval_results: dict = {}
+_last_run_id: str = ""
 
 
 def map_category(label: str) -> str:
@@ -146,7 +149,8 @@ def load():
       - No sklearn fallback, no mock fallback — wrong predictions are worse
         than no predictions for feedback quality and retraining integrity.
     """
-    global _booster, _label_encoder, _tfidf, _metadata, _model_version, _pipeline, _use_fallback, _fallback_mode
+    global _booster, _label_encoder, _tfidf, _metadata, _model_version
+    global _pipeline, _use_fallback, _fallback_mode, _last_eval_results, _last_run_id
 
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_TRACKING_URI)
     model_name = os.environ.get("M1_REGISTERED_MODEL_NAME", DEFAULT_MODEL_NAME)
@@ -178,24 +182,63 @@ def load():
             model_path = bundle_dir / "model.json"
 
         with metadata_path.open() as fh:
-            _metadata = json.load(fh)
-        _tfidf = joblib.load(tfidf_path)
-        _label_encoder = joblib.load(label_encoder_path)
-        _booster = xgb.Booster()
-        _booster.load_model(str(model_path))
+            new_metadata = json.load(fh)
+        new_tfidf = joblib.load(tfidf_path)
+        new_label_encoder = joblib.load(label_encoder_path)
+        new_booster = xgb.Booster()
+        new_booster.load_model(str(model_path))
 
         # Ray Train's XGBoostTrainer saves the model with multi:softmax regardless
         # of the objective passed in params. Re-set to multi:softprob so predict()
         # returns a full [n_samples, n_classes] probability matrix instead of a
         # 1D class-index array. The underlying weights are identical — only the
         # output interpretation changes.
-        _booster.set_param("objective", "multi:softprob")
-        _booster.set_param("num_class", str(len(_label_encoder.classes_)))
+        new_booster.set_param("objective", "multi:softprob")
+        new_booster.set_param("num_class", str(len(new_label_encoder.classes_)))
 
-        _model_version = str(version.version)
+        new_version = str(version.version)
+        print(f"[M1] Loaded Ray model '{model_name}' version {new_version} (softprob mode)")
+
+        eval_results = offline_eval.run_full_eval(
+            booster=new_booster,
+            tfidf=new_tfidf,
+            label_encoder=new_label_encoder,
+            metadata=new_metadata,
+            model_version=new_version,
+            run_id=version.run_id,
+            tracking_uri=tracking_uri,
+        )
+        _last_eval_results = eval_results
+        _last_run_id = version.run_id
+
+        if not eval_results.get("gate_passed", True):
+            reason = eval_results.get("reason", "unknown")
+            if _booster is not None and not _use_fallback:
+                print(
+                    f"[M1] EVAL GATE FAILED for v{new_version}: {reason} "
+                    f"— keeping previous model v{_model_version}"
+                )
+                return _booster, _label_encoder
+            print(
+                f"[M1] EVAL GATE FAILED for v{new_version}: {reason} "
+                "— no previous model available, entering degraded mode"
+            )
+            _use_fallback = True
+            _fallback_mode = "degraded"
+            _model_version = None
+            _booster = None
+            _tfidf = None
+            _label_encoder = None
+            _pipeline = None
+            return None, None
+
+        _booster = new_booster
+        _tfidf = new_tfidf
+        _label_encoder = new_label_encoder
+        _metadata = new_metadata
+        _model_version = new_version
         _use_fallback = False
         _fallback_mode = None
-        print(f"[M1] Loaded Ray model '{model_name}' version {_model_version} (softprob mode)")
         return _booster, _label_encoder
 
     except Exception as e:
@@ -219,6 +262,29 @@ def get_model_info():
         "class_count": len(_label_encoder.classes_) if _label_encoder is not None else 0,
         "mode": _fallback_mode if _use_fallback else "ray-xgboost",
     }
+
+
+def get_eval_results() -> dict:
+    return _last_eval_results
+
+
+def rerun_eval() -> dict:
+    global _last_eval_results
+    if _booster is None or _tfidf is None or _label_encoder is None:
+        return {"error": "no model loaded", "gate_passed": False}
+
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_TRACKING_URI)
+    results = offline_eval.run_full_eval(
+        booster=_booster,
+        tfidf=_tfidf,
+        label_encoder=_label_encoder,
+        metadata=_metadata,
+        model_version=_model_version or "",
+        run_id=_last_run_id,
+        tracking_uri=tracking_uri,
+    )
+    _last_eval_results = results
+    return results
 
 
 def _build_row(x: M1Input) -> tuple[pd.DataFrame, str]:
@@ -306,10 +372,12 @@ def predict(x: M1Input) -> M1Output:
 
 def reload() -> None:
     """Hot-reload the model from MLflow. Called by retrain-daemon after new version registered."""
-    global _booster, _label_encoder, _tfidf, _metadata, _model_version, _pipeline, _use_fallback, _fallback_mode
+    global _booster, _label_encoder, _tfidf, _metadata, _model_version
+    global _pipeline, _use_fallback, _fallback_mode, _last_eval_results, _last_run_id
     print("[M1] reload() triggered — re-loading model from MLflow")
     load()
-    print(f"[M1] reload() complete — now on version {_model_version}")
+    eval_status = "PASS" if _last_eval_results.get("gate_passed", True) else "FAIL"
+    print(f"[M1] reload() complete — version {_model_version}, eval gate: {eval_status}")
 
 
 def get_feedback_stats(since_version: str | None = None) -> dict:

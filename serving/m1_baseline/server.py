@@ -25,6 +25,20 @@ M1_CONFIDENCE = Histogram(
     "Distribution of M1 prediction confidence scores",
     buckets=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0],
 )
+M1_CONFIDENCE_PER_CATEGORY = Histogram(
+    "m1_confidence_per_category",
+    "Confidence distribution per predicted category",
+    ["predicted_category"],
+    buckets=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0],
+)
+M1_LOW_CONFIDENCE_TOTAL = Counter(
+    "m1_low_confidence_predictions_total",
+    "Predictions with confidence below auto-fill threshold (0.6)",
+)
+M1_AUTO_FILL_TOTAL = Counter(
+    "m1_auto_fill_total",
+    "Predictions that triggered auto-fill (confidence >= 0.6)",
+)
 M1_CORRECTIONS = Counter(
     "m1_corrections_total",
     "Number of times user overrode the ML-predicted category",
@@ -46,8 +60,26 @@ M1_MODEL_VERSION = Gauge(
     "m1_model_version_numeric",
     "Currently loaded model version as an integer (0 if non-numeric)",
 )
+M1_EVAL_MACRO_F1 = Gauge(
+    "m1_eval_macro_f1",
+    "Offline eval macro F1 of the currently loaded model",
+)
+M1_EVAL_ACCURACY = Gauge(
+    "m1_eval_accuracy",
+    "Offline eval accuracy of the currently loaded model",
+)
+M1_EVAL_GATE_PASSED = Gauge(
+    "m1_eval_gate_passed",
+    "1 if offline eval gate passed for the current model, 0 if failed",
+)
+M1_EVAL_CATEGORY_F1 = Gauge(
+    "m1_eval_category_f1",
+    "Per-category F1 from offline eval",
+    ["category"],
+)
 
 _model_ready = False
+CONFIDENCE_THRESHOLD = 0.6
 
 
 def _update_version_gauge():
@@ -58,12 +90,31 @@ def _update_version_gauge():
         M1_MODEL_VERSION.set(0)
 
 
+def _update_eval_gauges():
+    results = real_model.get_eval_results()
+    if not results:
+        return
+
+    M1_EVAL_GATE_PASSED.set(1.0 if results.get("gate_passed", True) else 0.0)
+
+    evaluations = results.get("evaluations", {})
+    for source in ("synthetic", "sanity"):
+        if source in evaluations:
+            source_metrics = evaluations[source]
+            M1_EVAL_MACRO_F1.set(source_metrics.get("macro_f1", 0.0))
+            M1_EVAL_ACCURACY.set(source_metrics.get("accuracy", 0.0))
+            for category, f1_value in source_metrics.get("per_category_f1", {}).items():
+                M1_EVAL_CATEGORY_F1.labels(category=category).set(f1_value)
+            break
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _model_ready
     real_model.load()
     _model_ready = True
     _update_version_gauge()
+    _update_eval_gauges()
     yield
 
 
@@ -122,7 +173,13 @@ def health():
             "model_version": None,
             "reason": "MLflow unreachable or model load failed — serving null predictions",
         }
-    return {"status": "ok", "model_version": real_model._model_version}
+    eval_results = real_model.get_eval_results()
+    eval_gate = eval_results.get("gate_passed", True) if eval_results else True
+    return {
+        "status": "ok",
+        "model_version": real_model._model_version,
+        "eval_gate_passed": eval_gate,
+    }
 
 
 @app.get("/")
@@ -138,7 +195,9 @@ def root():
             "/metrics",
             "/metrics/feedback",
             "/metrics/feedback/since/{model_version}",
+            "/metrics/evaluation",
             "/admin/reload",
+            "/admin/run-eval",
         ],
     }
 
@@ -151,6 +210,14 @@ def predict_category_endpoint(request: M1Input):
     result = real_model.predict(request)
     M1_PREDICTIONS.labels(predicted_category=result.predicted_category).inc()
     M1_CONFIDENCE.observe(result.confidence)
+    if result.predicted_category:
+        M1_CONFIDENCE_PER_CATEGORY.labels(
+            predicted_category=result.predicted_category
+        ).observe(result.confidence)
+    if result.confidence < CONFIDENCE_THRESHOLD:
+        M1_LOW_CONFIDENCE_TOTAL.inc()
+    if result.auto_fill:
+        M1_AUTO_FILL_TOTAL.inc()
     return result
 
 
@@ -191,6 +258,15 @@ def feedback_metrics_since(model_version: str):
     return real_model.get_feedback_stats(since_version=model_version)
 
 
+@app.get("/metrics/evaluation")
+def evaluation_metrics():
+    """Return the latest offline evaluation results for the loaded model."""
+    results = real_model.get_eval_results()
+    if not results:
+        return {"status": "no evaluation run yet"}
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Admin — hot-reload model
 # ---------------------------------------------------------------------------
@@ -215,6 +291,7 @@ def admin_reload(version: str | None = None):
             del os.environ["M1_MODEL_VERSION"]
         real_model.reload()
         _update_version_gauge()
+        _update_eval_gauges()
 
     threading.Thread(target=_do_reload, args=(version,), daemon=True).start()
     return {
@@ -222,3 +299,11 @@ def admin_reload(version: str | None = None):
         "pin_version": version,
         "current_version": real_model._model_version,
     }
+
+
+@app.post("/admin/run-eval")
+def admin_run_eval():
+    """Re-run offline evaluation on the currently loaded model."""
+    results = real_model.rerun_eval()
+    _update_eval_gauges()
+    return results
