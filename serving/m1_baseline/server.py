@@ -29,6 +29,11 @@ M1_CORRECTIONS = Counter(
     "m1_corrections_total",
     "Number of times user overrode the ML-predicted category",
 )
+M1_CORRECTION_TRANSITIONS = Counter(
+    "m1_correction_transitions_total",
+    "User overrides from predicted category to chosen category",
+    ["predicted_category", "chosen_category"],
+)
 M1_ACCEPTS = Counter(
     "m1_accepts_total",
     "Number of times user accepted the ML-predicted category",
@@ -158,6 +163,10 @@ def feedback_endpoint(request: M1FeedbackBatch):
     for entry in request.entries:
         if entry.feedback_type == "overridden":
             M1_CORRECTIONS.inc()
+            M1_CORRECTION_TRANSITIONS.labels(
+                predicted_category=entry.predicted_category or "unknown",
+                chosen_category=entry.chosen_category or "unknown",
+            ).inc()
         elif entry.feedback_type == "accepted":
             M1_ACCEPTS.inc()
 

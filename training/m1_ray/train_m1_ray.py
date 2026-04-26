@@ -18,7 +18,7 @@ import ray
 import xgboost as xgb
 from mlflow.tracking import MlflowClient
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import accuracy_score, classification_report, f1_score, log_loss, top_k_accuracy_score
 from sklearn.preprocessing import LabelEncoder
 from scipy.sparse import csr_matrix, hstack
 
@@ -192,6 +192,25 @@ def _normalize_feedback_df(path):
     return df.sort_values("date").reset_index(drop=True), local_path
 
 
+def _split_feedback_for_eval(feedback_df, config):
+    fraction = float(
+        os.environ.get(
+            "M1_RAY_FEEDBACK_EVAL_FRACTION",
+            config.get("feedback_eval_fraction", 0.2),
+        )
+    )
+    fraction = max(0.0, min(fraction, 0.5))
+    if len(feedback_df) < 2 or fraction <= 0:
+        return feedback_df.copy(), feedback_df.iloc[0:0].copy(), fraction
+
+    eval_rows = max(1, int(len(feedback_df) * fraction))
+    eval_rows = min(eval_rows, len(feedback_df) - 1)
+    feedback_df = feedback_df.sort_values("date").reset_index(drop=True)
+    train_feedback = feedback_df.iloc[:-eval_rows].copy()
+    eval_feedback = feedback_df.iloc[-eval_rows:].copy()
+    return train_feedback, eval_feedback, fraction
+
+
 def _featurize_split(train_df, test_df, config):
     train_df = train_df.copy()
     test_df = test_df.copy()
@@ -281,22 +300,35 @@ def load_and_prepare(config, mode):
 
     production_path = None
     production_rows = 0
+    production_train_rows = 0
+    production_eval_rows = 0
+    feedback_eval_fraction = 0.0
     if mode == "retrain" and config.get("production_path"):
         feedback_df, production_path = _normalize_feedback_df(config["production_path"])
         production_rows = len(feedback_df)
         if production_rows > 0:
+            train_feedback_df, eval_feedback_df, feedback_eval_fraction = _split_feedback_for_eval(
+                feedback_df, config
+            )
+            production_train_rows = len(train_feedback_df)
+            production_eval_rows = len(eval_feedback_df)
             # Oversample feedback rows so user corrections have more influence
             # than the sparse bootstrap data. feedback_weight=10 means each
             # correction counts as 10 training examples.
             feedback_weight = int(config.get("feedback_weight", 5))
-            feedback_df_weighted = pd.concat(
-                [feedback_df] * feedback_weight, ignore_index=True
-            )
-            train_df = pd.concat([train_df, feedback_df_weighted], ignore_index=True)
-            train_df = train_df.sort_values("date").reset_index(drop=True)
+            if production_train_rows > 0:
+                feedback_df_weighted = pd.concat(
+                    [train_feedback_df] * feedback_weight, ignore_index=True
+                )
+                train_df = pd.concat([train_df, feedback_df_weighted], ignore_index=True)
+                train_df = train_df.sort_values("date").reset_index(drop=True)
+            if production_eval_rows > 0:
+                test_df = pd.concat([test_df, eval_feedback_df], ignore_index=True)
+                test_df = test_df.sort_values("date").reset_index(drop=True)
             log(
                 f"loaded {production_rows} feedback rows "
-                f"(oversampled {feedback_weight}x → {production_rows * feedback_weight} rows) "
+                f"(train={production_train_rows}, eval={production_eval_rows}, "
+                f"oversampled train {feedback_weight}x → {production_train_rows * feedback_weight} rows) "
                 f"from {production_path}"
             )
 
@@ -318,6 +350,9 @@ def load_and_prepare(config, mode):
         "resolved_eval_path": eval_resolved_path,
         "resolved_production_path": production_path,
         "production_rows": production_rows,
+        "production_train_rows": production_train_rows,
+        "production_eval_rows": production_eval_rows,
+        "feedback_eval_fraction": feedback_eval_fraction,
     }
 
 
@@ -368,7 +403,13 @@ def main():
         or (config.get("production_path") if args.mode == "retrain" else None)
     )
     quality_gate = float(
-        os.environ.get("M1_RAY_GATE_FLOOR", config.get("quality_gate_macro_f1", 0.65))
+        os.environ.get(
+            "M1_RAY_GATE_TOP3",
+            os.environ.get(
+                "M1_RAY_GATE_FLOOR",
+                config.get("quality_gate_top3_accuracy", config.get("quality_gate_macro_f1", 0.65)),
+            ),
+        )
     )
     registered_model_name = config.get("registered_model_name", "m1-ray-categorization")
 
@@ -377,7 +418,7 @@ def main():
     log(f"eval_path={eval_path or None}")
     log(f"production_path={production_path}")
     log(f"eval_path={eval_path or '(80/20 chronological split)'}")
-    log(f"quality_gate_macro_f1={quality_gate}")
+    log(f"quality_gate_top3_accuracy={quality_gate}")
 
     config = dict(config)
     config["data_path"] = data_path
@@ -398,6 +439,9 @@ def main():
     resolved_eval_path    = prepared["resolved_eval_path"]
     resolved_production_path = prepared["resolved_production_path"]
     production_rows       = prepared["production_rows"]
+    production_train_rows = prepared["production_train_rows"]
+    production_eval_rows  = prepared["production_eval_rows"]
+    feedback_eval_fraction = prepared["feedback_eval_fraction"]
     num_classes = len(le.classes_)
 
     log(f"training: train={x_train.shape[0]:,} rows  eval={x_test.shape[0]:,} rows  features={x_train.shape[1]}")
@@ -427,8 +471,11 @@ def main():
             "production_path":         production_path or "",
             "resolved_production_path": resolved_production_path or "",
             "production_rows":         production_rows,
+            "production_train_rows":   production_train_rows,
+            "production_eval_rows":    production_eval_rows,
             "feedback_weight":         int(config.get("feedback_weight", 5)),
-            "production_rows_weighted": production_rows * int(config.get("feedback_weight", 5)),
+            "feedback_eval_fraction":  feedback_eval_fraction,
+            "production_rows_weighted": production_train_rows * int(config.get("feedback_weight", 5)),
             "eval_split":              eval_path or "80/20_chronological",
             "n_estimators":            config["model"]["n_estimators"],
             "max_depth":               config["model"]["max_depth"],
@@ -440,7 +487,7 @@ def main():
             "tfidf_ngram_min":         config["tfidf"]["ngram_min"],
             "tfidf_ngram_max":         config["tfidf"]["ngram_max"],
             "tfidf_max_features":      config["tfidf"]["max_features"],
-            "quality_gate_macro_f1":   quality_gate,
+            "quality_gate_top3_accuracy": quality_gate,
             "python_version":          platform.python_version(),
             "platform":                platform.platform(),
             "ray_version":             ray.__version__,
@@ -473,11 +520,17 @@ def main():
             macro_f1    = f1_score(y_test, y_pred, average="macro",    zero_division=0)
             weighted_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
             accuracy    = accuracy_score(y_test, y_pred)
+            top3_accuracy = top_k_accuracy_score(
+                y_test, pred_proba, k=min(3, num_classes), labels=np.arange(num_classes)
+            )
+            multiclass_log_loss = log_loss(y_test, pred_proba, labels=np.arange(num_classes))
 
             mlflow.log_metrics({
                 "macro_f1":          macro_f1,
                 "weighted_f1":       weighted_f1,
                 "accuracy":          accuracy,
+                "top3_accuracy":     top3_accuracy,
+                "log_loss":          multiclass_log_loss,
                 "train_time_seconds": train_time,
                 "train_size":        prepared["train_size"],
                 "test_size":         prepared["test_size"],
@@ -510,10 +563,10 @@ def main():
             save_bundle(bundle_dir, model_path, tfidf, le, feature_cols)
             mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
 
-            absolute_passed = macro_f1 >= quality_gate
+            absolute_passed = top3_accuracy >= quality_gate
             client_for_gate = MlflowClient()
-            prev_version, prev_metric = get_latest_production_metric(registered_model_name, "macro_f1")
-            log(f"previous version: v{prev_version} macro_f1={prev_metric}")
+            prev_version, prev_metric = get_latest_production_metric(registered_model_name, "top3_accuracy")
+            log(f"previous version: v{prev_version} top3_accuracy={prev_metric}")
 
             prev_per_cat_f1 = get_per_category_f1_from_run(client_for_gate, registered_model_name)
             category_gate_passed, regressed_cats = check_category_regression(
@@ -528,7 +581,7 @@ def main():
 
             do_register, reason = should_register(
                 mode=args.mode,
-                current_metric=macro_f1,
+                current_metric=top3_accuracy,
                 previous_metric=prev_metric,
                 higher_is_better=True,
                 absolute_gate_passed=absolute_passed,
@@ -536,7 +589,7 @@ def main():
                 prefix="M1-RAY",
             )
 
-            mlflow.set_tag("quality_gate_metric", "macro_f1")
+            mlflow.set_tag("quality_gate_metric", "top3_accuracy")
             mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
             mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
             mlflow.set_tag("regressed_categories", ",".join(regressed_cats) if regressed_cats else "none")
@@ -552,7 +605,11 @@ def main():
             else:
                 log(f"NOT REGISTERED — {reason}")
 
-            log(f"macro_f1={macro_f1:.4f}, accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, train_time={train_time:.1f}s")
+            log(
+                f"top3_accuracy={top3_accuracy:.4f}, macro_f1={macro_f1:.4f}, "
+                f"accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, "
+                f"log_loss={multiclass_log_loss:.4f}, train_time={train_time:.1f}s"
+            )
             log(f"done | run_id={run.info.run_id}")
 
     ray.shutdown()

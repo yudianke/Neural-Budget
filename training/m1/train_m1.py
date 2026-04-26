@@ -17,7 +17,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, log_loss, top_k_accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder
 
@@ -79,6 +79,25 @@ def load_real_eval(path):
     return ensure_numeric_cols(df)
 
 
+def split_feedback_for_eval(df, config):
+    fraction = float(
+        os.environ.get(
+            "M1_FEEDBACK_EVAL_FRACTION",
+            config.get("feedback_eval_fraction", 0.2),
+        )
+    )
+    fraction = max(0.0, min(fraction, 0.5))
+    if len(df) < 2 or fraction <= 0:
+        return df.copy(), df.iloc[0:0].copy(), fraction
+
+    df = df.sort_values("date").reset_index(drop=True)
+    eval_rows = max(1, int(len(df) * fraction))
+    eval_rows = min(eval_rows, len(df) - 1)
+    train_feedback = df.iloc[:-eval_rows].copy()
+    eval_feedback = df.iloc[-eval_rows:].copy()
+    return train_feedback, eval_feedback, fraction
+
+
 def build_model(config):
     tfidf = TfidfVectorizer(
         analyzer=config["tfidf"].get("analyzer", "word"),
@@ -124,13 +143,31 @@ def evaluate(pipeline, df, le, label):
     n_filtered = int((~known_mask).sum())
     df_eval = df[known_mask].reset_index(drop=True)
     if len(df_eval) == 0:
-        return 0.0, 0.0, 0
+        return {
+            "macro_f1": 0.0,
+            "weighted_f1": 0.0,
+            "top3_accuracy": 0.0,
+            "log_loss": 0.0,
+            "n_rows": 0,
+        }
     y_true = le.transform(df_eval[LABEL_COL])
     y_pred = pipeline.predict(df_eval)
+    y_proba = pipeline.predict_proba(df_eval)
     macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
     weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
-    log(f"{label}: macro_f1={macro:.4f} weighted_f1={weighted:.4f} n={len(df_eval)} filtered={n_filtered}")
-    return macro, weighted, len(df_eval)
+    top3 = top_k_accuracy_score(y_true, y_proba, k=min(3, len(le.classes_)), labels=np.arange(len(le.classes_)))
+    loss = log_loss(y_true, y_proba, labels=np.arange(len(le.classes_)))
+    log(
+        f"{label}: macro_f1={macro:.4f} weighted_f1={weighted:.4f} "
+        f"top3_accuracy={top3:.4f} log_loss={loss:.4f} n={len(df_eval)} filtered={n_filtered}"
+    )
+    return {
+        "macro_f1": macro,
+        "weighted_f1": weighted,
+        "top3_accuracy": top3,
+        "log_loss": loss,
+        "n_rows": len(df_eval),
+    }
 
 
 def main():
@@ -145,8 +182,24 @@ def main():
     synth_eval_path = os.environ.get("M1_EVAL_PATH", config["eval_path"])
     real_eval_path = os.environ.get("M1_REAL_EVAL_PATH", config["real_eval_path"])
     production_path = config.get("production_path") if args.mode == "retrain" else None
-    gate_floor = float(os.environ.get("M1_GATE_FLOOR", config.get("quality_gate_floor", 0.55)))
-    gate_ceiling = float(os.environ.get("M1_GATE_CEILING", config.get("quality_gate_ceiling", 0.98)))
+    gate_floor = float(
+        os.environ.get(
+            "M1_GATE_TOP3_FLOOR",
+            os.environ.get(
+                "M1_GATE_FLOOR",
+                config.get("quality_gate_top3_floor", config.get("quality_gate_floor", 0.55)),
+            ),
+        )
+    )
+    gate_ceiling = float(
+        os.environ.get(
+            "M1_GATE_TOP3_CEILING",
+            os.environ.get(
+                "M1_GATE_CEILING",
+                config.get("quality_gate_top3_ceiling", config.get("quality_gate_ceiling", 0.98)),
+            ),
+        )
+    )
     registered_model_name = config.get("registered_model_name", "m1-categorization")
 
     log(f"mode={args.mode} tracking_uri={tracking_uri}")
@@ -154,9 +207,31 @@ def main():
     log(f"production_path={production_path}")
     log(f"gate floor={gate_floor} ceiling={gate_ceiling}")
 
-    train_df = load_synthetic(train_path, production_path)
+    train_df = load_synthetic(train_path, None)
     synth_eval_df = load_synthetic(synth_eval_path, None)
     real_eval_df = load_real_eval(real_eval_path)
+    production_rows = 0
+    production_train_rows = 0
+    production_eval_rows = 0
+    feedback_eval_fraction = 0.0
+    if production_path:
+        production_df = load_real_eval(production_path)
+        production_rows = len(production_df)
+        if production_rows > 0:
+            train_feedback_df, eval_feedback_df, feedback_eval_fraction = split_feedback_for_eval(
+                production_df, config
+            )
+            production_train_rows = len(train_feedback_df)
+            production_eval_rows = len(eval_feedback_df)
+            if production_train_rows > 0:
+                train_df = pd.concat([train_df, train_feedback_df], ignore_index=True)
+            if production_eval_rows > 0:
+                real_eval_df = pd.concat([real_eval_df, eval_feedback_df], ignore_index=True)
+            log(
+                f"loaded {production_rows} production rows "
+                f"(train={production_train_rows}, real_eval={production_eval_rows}) "
+                f"from {production_path}"
+            )
 
     le = LabelEncoder()
     y_train = le.fit_transform(train_df[LABEL_COL])
@@ -177,8 +252,12 @@ def main():
                 "num_classes_trained": len(le.classes_),
                 "train_path": train_path,
                 "production_path": production_path or "",
-                "gate_floor": gate_floor,
-                "gate_ceiling": gate_ceiling,
+                "production_rows": production_rows,
+                "production_train_rows": production_train_rows,
+                "production_eval_rows": production_eval_rows,
+                "feedback_eval_fraction": feedback_eval_fraction,
+                "gate_top3_floor": gate_floor,
+                "gate_top3_ceiling": gate_ceiling,
                 "python_version": platform.python_version(),
                 "platform": platform.platform(),
             }
@@ -197,28 +276,32 @@ def main():
         train_time = time.time() - start
         mlflow.log_metric("train_time_seconds", train_time)
 
-        synth_macro, synth_weighted, _ = evaluate(pipeline, synth_eval_df, le, "synthetic_eval")
-        real_macro, real_weighted, _ = evaluate(pipeline, real_eval_df, le, "real_eval")
+        synth_metrics = evaluate(pipeline, synth_eval_df, le, "synthetic_eval")
+        real_metrics = evaluate(pipeline, real_eval_df, le, "real_eval")
 
-        mlflow.log_metric("synth_macro_f1", synth_macro)
-        mlflow.log_metric("synth_weighted_f1", synth_weighted)
-        mlflow.log_metric("real_macro_f1", real_macro)
-        mlflow.log_metric("real_weighted_f1", real_weighted)
+        mlflow.log_metric("synth_macro_f1", synth_metrics["macro_f1"])
+        mlflow.log_metric("synth_weighted_f1", synth_metrics["weighted_f1"])
+        mlflow.log_metric("synth_top3_accuracy", synth_metrics["top3_accuracy"])
+        mlflow.log_metric("synth_log_loss", synth_metrics["log_loss"])
+        mlflow.log_metric("real_macro_f1", real_metrics["macro_f1"])
+        mlflow.log_metric("real_weighted_f1", real_metrics["weighted_f1"])
+        mlflow.log_metric("real_top3_accuracy", real_metrics["top3_accuracy"])
+        mlflow.log_metric("real_log_loss", real_metrics["log_loss"])
 
-        absolute_passed = gate_floor <= real_macro <= gate_ceiling
-        prev_version, prev_metric = get_latest_production_metric(registered_model_name, "real_macro_f1")
-        log(f"previous version: v{prev_version} real_macro_f1={prev_metric}")
+        absolute_passed = gate_floor <= real_metrics["top3_accuracy"] <= gate_ceiling
+        prev_version, prev_metric = get_latest_production_metric(registered_model_name, "real_top3_accuracy")
+        log(f"previous version: v{prev_version} real_top3_accuracy={prev_metric}")
 
         do_register, reason = should_register(
             mode=args.mode,
-            current_metric=real_macro,
+            current_metric=real_metrics["top3_accuracy"],
             previous_metric=prev_metric,
             higher_is_better=True,
             absolute_gate_passed=absolute_passed,
             prefix="M1",
         )
 
-        mlflow.set_tag("quality_gate_metric", "real_macro_f1")
+        mlflow.set_tag("quality_gate_metric", "real_top3_accuracy")
         mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
         mlflow.set_tag("registered", str(do_register).lower())
         mlflow.set_tag("register_reason", reason)

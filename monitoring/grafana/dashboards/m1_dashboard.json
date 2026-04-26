@@ -327,6 +327,48 @@
         { "expr": "rate(m1_corrections_total[5m])", "legendFormat": "Corrections" },
         { "expr": "rate(m1_accepts_total[5m])", "legendFormat": "Accepts" }
       ]
+    },
+    {
+      "id": 13,
+      "title": "Top Correction Paths",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "Corrections" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "predicted_category" },
+            "properties": [{ "id": "displayName", "value": "Predicted" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "chosen_category" },
+            "properties": [{ "id": "displayName", "value": "Chosen" }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (predicted_category, chosen_category) (m1_correction_transitions_total))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": ""
+        }
+      ]
     }
   ]
 }
