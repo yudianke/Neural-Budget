@@ -1,0 +1,26 @@
+data_path: "/Users/chetan/Downloads/categorization_train.csv"
+eval_path: "/Users/chetan/Downloads/categorization_eval.csv"
+production_path: ""
+mlflow_tracking_uri: "http://129.114.26.214:8000"
+experiment_name: "m1-categorization-ray"
+registered_model_name: "m1-ray-categorization"
+quality_gate_macro_f1: 0.65
+
+tfidf:
+  ngram_min: 1
+  ngram_max: 4
+  max_features: 4000
+
+model:
+  n_estimators: 300
+  max_depth: 4
+  learning_rate: 0.03
+
+feedback_weight: 10
+checkpoint_dir: "/tmp/m1-ray-checkpoints"
+
+max_train_rows: 50000
+max_eval_rows: 10000
+
+s3:
+  endpoint_url: "https://chi.tacc.chameleoncloud.org:7480"

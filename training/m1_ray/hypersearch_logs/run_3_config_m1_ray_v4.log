@@ -1,0 +1,36 @@
+[M1-RAY 13:34:18] mode=bootstrap tracking_uri=http://129.114.26.214:8000
+[M1-RAY 13:34:18] data_path=swift://neural-budget-data-proj16/processed/categorization_train.csv
+[M1-RAY 13:34:18] eval_path=swift://neural-budget-data-proj16/processed/categorization_eval.csv
+[M1-RAY 13:34:18] production_path=None
+[M1-RAY 13:34:18] eval_path=swift://neural-budget-data-proj16/processed/categorization_eval.csv
+[M1-RAY 13:34:18] quality_gate_macro_f1=0.65
+[M1-RAY 13:34:18] using cached /tmp/nb_data_cache/neural-budget-data-proj16/processed/categorization_train.csv
+[M1-RAY 13:34:18] using cached /tmp/nb_data_cache/neural-budget-data-proj16/processed/categorization_train.csv
+[M1-RAY 13:34:21] using cached /tmp/nb_data_cache/neural-budget-data-proj16/processed/categorization_eval.csv
+[M1-RAY 13:34:21] using cached /tmp/nb_data_cache/neural-budget-data-proj16/processed/categorization_eval.csv
+[M1-RAY 13:35:08] building DMatrix: train=1,356,334 rows  eval=339,084 rows  features=1745
+[0]	train-mlogloss:2.25291	eval-mlogloss:2.25297
+[50]	train-mlogloss:0.13634	eval-mlogloss:0.13631
+[100]	train-mlogloss:0.01240	eval-mlogloss:0.01240
+[150]	train-mlogloss:0.00105	eval-mlogloss:0.00105
+[200]	train-mlogloss:0.00010	eval-mlogloss:0.00010
+[250]	train-mlogloss:0.00002	eval-mlogloss:0.00002
+[300]	train-mlogloss:0.00001	eval-mlogloss:0.00001
+[350]	train-mlogloss:0.00001	eval-mlogloss:0.00001
+[399]	train-mlogloss:0.00001	eval-mlogloss:0.00001
+2026/04/23 13:40:22 WARNING mlflow.models.model: Model logged without a signature and input example. Please set `input_example` parameter when logging the model to auto infer the model signature.
+[safeguard] running safeguarding checks...
+[safeguard] fairness: underperforming=none
+[safeguard] explainability: top_features.json logged to MLflow
+[safeguard] robustness OK: low_confidence_rate=0.0%
+[safeguard] privacy: no card-number patterns detected
+[safeguard] accountability: git_commit=c33ccb6
+[safeguard] accountability: data_hash=4a99e24b90616ced98cd2ed172922ad2
+[safeguard] all checks complete
+[M1-RAY 13:40:29] previous version: v5 macro_f1=1.0
+[M1-RAY 13:40:29] category regression gate passed (checked 15 categories)
+[M1-RAY 13:40:30] NOT REGISTERED — no improvement (prev=1.0000 -> curr=1.0000)
+[M1-RAY 13:40:30] macro_f1=1.0000, accuracy=1.0000, weighted_f1=1.0000, train_time=297.6s
+[M1-RAY 13:40:30] done | run_id=14c8e108469a485ab477fdb899f79bba
+2026/04/23 13:40:30 INFO mlflow.tracking._tracking_service.client: 🏃 View run kindly-colt-124 at: http://129.114.26.214:8000/#/experiments/4/runs/14c8e108469a485ab477fdb899f79bba.
+2026/04/23 13:40:30 INFO mlflow.tracking._tracking_service.client: 🧪 View experiment at: http://129.114.26.214:8000/#/experiments/4.
