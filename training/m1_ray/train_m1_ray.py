@@ -247,7 +247,23 @@ def _featurize_split(train_df, test_df, config):
 
     feature_cols = [f"f{i}" for i in range(x_train.shape[1])]
 
-    return x_train, train_df["label"].values, x_test, test_df["label"].values, le, tfidf, feature_cols
+    # Mask of which surviving test rows came from real user feedback (vs synthetic
+    # eval). Used in main() to compute a separate real-world macro_f1 gate.
+    if "source" in test_df.columns:
+        test_is_feedback = (test_df["source"].fillna("") == "production_feedback").values
+    else:
+        test_is_feedback = np.zeros(len(test_df), dtype=bool)
+
+    return (
+        x_train,
+        train_df["label"].values,
+        x_test,
+        test_df["label"].values,
+        le,
+        tfidf,
+        feature_cols,
+        test_is_feedback,
+    )
 
 
 def _apply_row_caps(train_df, test_df, config):
@@ -333,8 +349,8 @@ def load_and_prepare(config, mode):
             )
 
     train_df, test_df = _apply_row_caps(train_df, test_df, config)
-    x_train, y_train, x_test, y_test, le, tfidf, feature_cols = _featurize_split(
-        train_df, test_df, config
+    x_train, y_train, x_test, y_test, le, tfidf, feature_cols, test_is_feedback = (
+        _featurize_split(train_df, test_df, config)
     )
     return {
         "x_train": x_train,
@@ -346,6 +362,7 @@ def load_and_prepare(config, mode):
         "label_encoder": le,
         "tfidf": tfidf,
         "feature_cols": feature_cols,
+        "test_is_feedback": test_is_feedback,
         "resolved_bootstrap_path": bootstrap_path,
         "resolved_eval_path": eval_resolved_path,
         "resolved_production_path": production_path,
@@ -409,6 +426,18 @@ def main():
                 "M1_RAY_GATE_FLOOR",
                 config.get("quality_gate_top3_accuracy", config.get("quality_gate_macro_f1", 0.65)),
             ),
+        )
+    )
+    real_world_floor = float(
+        os.environ.get(
+            "M1_RAY_REAL_WORLD_GATE_FLOOR",
+            config.get("real_world_gate_floor", 0.40),
+        )
+    )
+    real_world_min_rows = int(
+        os.environ.get(
+            "M1_RAY_REAL_WORLD_MIN_ROWS",
+            config.get("real_world_min_rows", 20),
         )
     )
     registered_model_name = config.get("registered_model_name", "m1-ray-categorization")
@@ -488,6 +517,8 @@ def main():
             "tfidf_ngram_max":         config["tfidf"]["ngram_max"],
             "tfidf_max_features":      config["tfidf"]["max_features"],
             "quality_gate_top3_accuracy": quality_gate,
+            "real_world_gate_floor":   real_world_floor,
+            "real_world_min_rows":     real_world_min_rows,
             "python_version":          platform.python_version(),
             "platform":                platform.platform(),
             "ray_version":             ray.__version__,
@@ -537,6 +568,44 @@ def main():
                 "num_classes":       num_classes,
             })
 
+            # Real-world macro_f1 — only over user-feedback rows in the eval split.
+            # The synthetic eval has near-perfect merchant overlap with training so
+            # the headline macro_f1 is essentially memorization. The real-world
+            # subset (held-out user corrections) is what tells us if the model
+            # generalizes to merchants it actually sees in production.
+            test_is_feedback = prepared["test_is_feedback"]
+            real_world_eval_rows = int(test_is_feedback.sum())
+            if real_world_eval_rows >= real_world_min_rows:
+                rw_y_true = y_test[test_is_feedback]
+                rw_y_pred = y_pred[test_is_feedback]
+                real_world_macro_f1 = float(
+                    f1_score(rw_y_true, rw_y_pred, average="macro", zero_division=0)
+                )
+                real_world_gate_passed = real_world_macro_f1 >= real_world_floor
+                real_world_skip_reason = ""
+                mlflow.log_metric("real_world_macro_f1", real_world_macro_f1)
+                log(
+                    f"real_world_macro_f1={real_world_macro_f1:.4f} "
+                    f"(over {real_world_eval_rows} feedback rows; floor={real_world_floor:.2f})"
+                )
+            else:
+                real_world_macro_f1 = None
+                # Skip the gate when there isn't enough feedback to fail on it.
+                # First few retrains will hit this branch; that's fine — we don't
+                # want a 5-row noisy F1 to block registration.
+                real_world_gate_passed = True
+                real_world_skip_reason = (
+                    f"only {real_world_eval_rows} feedback eval rows < "
+                    f"{real_world_min_rows} required"
+                )
+                log(f"real_world gate skipped — {real_world_skip_reason}")
+            mlflow.log_metric("real_world_eval_rows", real_world_eval_rows)
+            mlflow.set_tag("real_world_gate_passed", str(real_world_gate_passed).lower())
+            mlflow.set_tag("real_world_gate_floor", str(real_world_floor))
+            mlflow.set_tag("real_world_min_rows", str(real_world_min_rows))
+            if real_world_skip_reason:
+                mlflow.set_tag("real_world_gate_skipped_reason", real_world_skip_reason)
+
             present = np.unique(np.concatenate([y_test, y_pred]))
             report = classification_report(
                 y_test, y_pred,
@@ -563,7 +632,11 @@ def main():
             save_bundle(bundle_dir, model_path, tfidf, le, feature_cols)
             mlflow.log_artifacts(str(bundle_dir), artifact_path="bundle")
 
-            absolute_passed = top3_accuracy >= quality_gate
+            top3_passed = top3_accuracy >= quality_gate
+            # Combined absolute gate: legacy top3 floor AND new real-world floor.
+            # The real-world piece auto-passes when there's not enough feedback
+            # data (real_world_min_rows), so this is backward-compatible.
+            absolute_passed = top3_passed and real_world_gate_passed
             client_for_gate = MlflowClient()
             prev_version, prev_metric = get_latest_production_metric(registered_model_name, "top3_accuracy")
             log(f"previous version: v{prev_version} top3_accuracy={prev_metric}")
@@ -590,6 +663,7 @@ def main():
             )
 
             mlflow.set_tag("quality_gate_metric", "top3_accuracy")
+            mlflow.set_tag("top3_gate_passed", str(top3_passed).lower())
             mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
             mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
             mlflow.set_tag("regressed_categories", ",".join(regressed_cats) if regressed_cats else "none")
@@ -605,10 +679,16 @@ def main():
             else:
                 log(f"NOT REGISTERED — {reason}")
 
+            rw_str = (
+                f"real_world_macro_f1={real_world_macro_f1:.4f} (n={real_world_eval_rows})"
+                if real_world_macro_f1 is not None
+                else f"real_world_macro_f1=skipped (n={real_world_eval_rows})"
+            )
             log(
                 f"top3_accuracy={top3_accuracy:.4f}, macro_f1={macro_f1:.4f}, "
                 f"accuracy={accuracy:.4f}, weighted_f1={weighted_f1:.4f}, "
-                f"log_loss={multiclass_log_loss:.4f}, train_time={train_time:.1f}s"
+                f"log_loss={multiclass_log_loss:.4f}, {rw_str}, "
+                f"train_time={train_time:.1f}s"
             )
             log(f"done | run_id={run.info.run_id}")
 
