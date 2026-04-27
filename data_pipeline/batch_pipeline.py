@@ -466,8 +466,6 @@ def main() -> None:
         monthly_spend["year_month"].isin(eval_months)
     ].copy()
 
-    save_csv(forecasting_train, batch_dir / "forecasting_train.csv")
-    save_csv(forecasting_eval, batch_dir / "forecasting_eval.csv")
 
     # Forecasting dataset v2 (personalized, time-aware supervised rows)
     forecasting_df = add_monthly_forecast_features(
@@ -514,9 +512,7 @@ def main() -> None:
             dataset_summary(categorization_train, "categorization_train"),
             dataset_summary(categorization_eval, "categorization_eval"),
             dataset_summary(anomaly_train, "anomaly_train"),
-            dataset_summary(anomaly_eval, "anomaly_eval"),
-            dataset_summary(forecasting_train, "forecasting_train"),
-            dataset_summary(forecasting_eval, "forecasting_eval"),
+            dataset_summary(anomaly_eval, "anomaly_eval"),           
             dataset_summary(forecasting_train, "forecasting_train"),
             dataset_summary(forecasting_eval, "forecasting_eval"),
         ],
@@ -525,8 +521,6 @@ def main() -> None:
             "categorization_eval.csv",
             "anomaly_train.csv",
             "anomaly_eval.csv",
-            "forecasting_train.csv",
-            "forecasting_eval.csv",
             "forecasting_train.csv",
             "forecasting_eval.csv",
         ],
