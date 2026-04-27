@@ -10,14 +10,14 @@
 #   docker exec -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
 #     c6ade148e792_retrain-daemon bash /app/training/m1_ray/run_hypersearch.sh
 #
-# Monitor: MLflow UI http://129.114.26.214:8000/#/experiments/4
+# Monitor: MLflow UI http://129.114.25.192:8000/#/experiments/4
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${SCRIPT_DIR}/hypersearch_logs"
 mkdir -p "${LOG_DIR}"
 
-export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://129.114.26.214:8000}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-0fc136376b7c47528dfd06a09d12ccbd}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-b52fcbb61618453aacc6ababb530031c}"
 export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-https://chi.tacc.chameleoncloud.org:7480}"

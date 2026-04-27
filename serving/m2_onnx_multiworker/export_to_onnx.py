@@ -17,7 +17,7 @@ from mlflow.tracking import MlflowClient
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType
 
-MLFLOW_URL = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.214:8000")
+MLFLOW_URL = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.25.192:8000")
 REGISTERED_MODEL_NAME = "m2-anomaly"
 # Fallback: hardcoded logged-model ID (used only if registry query fails)
 FALLBACK_LOGGED_MODEL_ID = "m-c0a5e85dd6b0494ba3b1fa394db99480"

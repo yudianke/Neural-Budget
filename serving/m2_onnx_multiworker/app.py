@@ -55,7 +55,7 @@ DEFAULT_FEEDBACK_LOG_PATH = "/data/feedback/m2_feedback.jsonl"
 # Committed model.onnx — used as fallback when MLflow is unreachable
 FALLBACK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
 # MLflow config
-DEFAULT_MLFLOW_URI = "http://129.114.26.214:8000"
+DEFAULT_MLFLOW_URI = "http://129.114.25.192:8000"
 DEFAULT_MODEL_NAME = "m2-anomaly"
 # Number of input features (must match training)
 N_FEATURES = 6

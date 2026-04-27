@@ -45,9 +45,9 @@ M1 is fully wired end-to-end: training → FastAPI serving → loot-core client 
 The trained M2 model artifact exists on MLflow. Serving and UI wiring have not been done yet.
 
 **MLflow artifact details:**
-- MLflow UI: `http://129.114.26.214:8000/#/experiments`
+- MLflow UI: `http://129.114.25.192:8000/#/experiments`
 - Artifact path: `mlflow-artifacts:/2/<Run ID>/artifacts/model.pkl`
-- Direct download: `http://129.114.26.214:8000/ajax-api/2.0/mlflow/logged-models/m-c0a5e85dd6b0494ba3b1fa394db99480/artifacts/files?artifact_file_path=model.pkl`
+- Direct download: `http://129.114.25.192:8000/ajax-api/2.0/mlflow/logged-models/m-c0a5e85dd6b0494ba3b1fa394db99480/artifacts/files?artifact_file_path=model.pkl`
 
 ### M3 — NOT STARTED ⏳
 
@@ -424,7 +424,7 @@ charity, education, entertainment, gas, groceries, healthcare, housing, misc, pe
 
 ### Chameleon Cloud
 - All runs executed on Chameleon inside containers
-- MLflow: `http://129.114.26.214:8000`
+- MLflow: `http://129.114.25.192:8000`
 - Object storage for large datasets and model checkpoints
 
 ### Docker Containers

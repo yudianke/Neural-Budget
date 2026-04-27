@@ -1,7 +1,7 @@
 data_path: "swift://neural-budget-data-proj16/processed/categorization_train.csv"
 eval_path: "swift://neural-budget-data-proj16/processed/categorization_eval.csv"
 production_path: ""
-mlflow_tracking_uri: "http://129.114.26.214:8000"
+mlflow_tracking_uri: "http://129.114.25.192:8000"
 experiment_name: "m1-categorization-ray"
 registered_model_name: "m1-ray-categorization"
 quality_gate_macro_f1: 0.65

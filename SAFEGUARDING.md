@@ -55,7 +55,7 @@ Every training run logs a `explainability/top_features.json` artifact to MLflow 
 - All class names (spending categories)
 - Numeric feature names (log_amount, day_of_week, etc.)
 
-Viewable at: `http://129.114.26.214:8000 → Experiments → m1-ray-categorization → latest run → Artifacts → explainability/top_features.json`
+Viewable at: `http://129.114.25.192:8000 → Experiments → m1-ray-categorization → latest run → Artifacts → explainability/top_features.json`
 
 ### M2 — Badge type + rule flags exposed to user
 **Implementation:** `serving/m2_onnx_multiworker/app.py`, `actual/packages/desktop-client/src/components/transactions/TransactionsTable.tsx`
