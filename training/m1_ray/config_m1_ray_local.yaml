@@ -19,8 +19,5 @@ model:
 feedback_weight: 10
 checkpoint_dir: "/tmp/m1-ray-checkpoints"
 
-max_train_rows: 50000
-max_eval_rows: 10000
-
 s3:
   endpoint_url: "https://chi.tacc.chameleoncloud.org:7480"

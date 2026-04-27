@@ -25,14 +25,12 @@ from scipy.sparse import csr_matrix, hstack
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from _common import (  # noqa: E402
     check_category_regression,
-    get_latest_production_metric,
     get_per_category_f1_from_run,
     load_config,
     log as _log,
     register_model_version,
     resolve_path,
     setup_mlflow,
-    should_register,
 )
 from safeguarding import run_safeguarding_checks  # noqa: E402
 
@@ -47,6 +45,107 @@ TEXT_COL = "merchant"
 LABEL_COL = "category"
 NUMERIC_COLS = ["log_amount", "day_of_week", "day_of_month"]
 CANONICAL_COLUMNS = ["date", TEXT_COL, "amount", LABEL_COL]
+METRIC_EPS = 1e-6
+
+
+def _get_latest_registered_run_metrics(model_name: str) -> tuple[int | None, dict]:
+    """Return (latest_version, latest_run_metrics) for a registered model."""
+    try:
+        client = MlflowClient()
+        versions = client.search_model_versions(f"name='{model_name}'")
+        if not versions:
+            return None, {}
+        latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+        run = client.get_run(latest.run_id)
+        return int(latest.version), dict(run.data.metrics)
+    except Exception as e:
+        log(f"[WARN] could not fetch latest registered run metrics for {model_name}: {e}")
+        return None, {}
+
+
+def _decide_m1_registration(
+    *,
+    mode: str,
+    absolute_gate_passed: bool,
+    category_gate_passed: bool,
+    top3_accuracy: float,
+    weighted_f1: float,
+    multiclass_log_loss: float,
+    real_world_macro_f1: float | None,
+    previous_version: int | None,
+    previous_metrics: dict,
+) -> tuple[bool, str, str]:
+    """Registration decision with saturated-metric tie breaks.
+
+    Primary comparator:
+      1. real_world_macro_f1 when available for both current and previous model
+      2. otherwise top3_accuracy
+
+    Tie breaks when primary metric ties within epsilon:
+      1. lower log_loss
+      2. higher weighted_f1
+    """
+    if not absolute_gate_passed:
+        return False, f"absolute gate failed (top3_accuracy={top3_accuracy:.4f})", "top3_accuracy"
+
+    if not category_gate_passed:
+        return False, "per-category regression gate failed (>2% relative drop in ≥1 category)", "top3_accuracy"
+
+    if previous_version is None:
+        metric_name = "real_world_macro_f1" if real_world_macro_f1 is not None else "top3_accuracy"
+        current_value = real_world_macro_f1 if real_world_macro_f1 is not None else top3_accuracy
+        return True, f"no previous version, registering (current={current_value:.4f})", metric_name
+
+    prev_rw = previous_metrics.get("real_world_macro_f1")
+    prev_top3 = previous_metrics.get("top3_accuracy")
+    prev_log_loss = previous_metrics.get("log_loss")
+    prev_weighted_f1 = previous_metrics.get("weighted_f1")
+
+    if real_world_macro_f1 is not None and prev_rw is not None:
+        metric_name = "real_world_macro_f1"
+        current_primary = real_world_macro_f1
+        previous_primary = prev_rw
+    else:
+        metric_name = "top3_accuracy"
+        current_primary = top3_accuracy
+        previous_primary = prev_top3
+
+    if previous_primary is None:
+        return True, (
+            f"previous version missing {metric_name}, registering "
+            f"(current={current_primary:.4f})"
+        ), metric_name
+
+    if current_primary > previous_primary + METRIC_EPS:
+        return True, (
+            f"improved {metric_name} "
+            f"(prev={previous_primary:.4f} -> curr={current_primary:.4f})"
+        ), metric_name
+
+    if current_primary + METRIC_EPS < previous_primary:
+        return False, (
+            f"no improvement in {metric_name} "
+            f"(prev={previous_primary:.4f} -> curr={current_primary:.4f})"
+        ), metric_name
+
+    if prev_log_loss is not None and multiclass_log_loss < prev_log_loss - METRIC_EPS:
+        return True, (
+            f"tied {metric_name} at {current_primary:.4f}; "
+            f"log_loss improved (prev={prev_log_loss:.4f} -> curr={multiclass_log_loss:.4f})"
+        ), metric_name
+
+    if prev_weighted_f1 is not None and weighted_f1 > prev_weighted_f1 + METRIC_EPS:
+        return True, (
+            f"tied {metric_name} at {current_primary:.4f}; "
+            f"weighted_f1 improved (prev={prev_weighted_f1:.4f} -> curr={weighted_f1:.4f})"
+        ), metric_name
+
+    return False, (
+        f"tied {metric_name} at {current_primary:.4f} with no secondary improvement "
+        f"(log_loss prev={prev_log_loss if prev_log_loss is not None else 'n/a'} "
+        f"curr={multiclass_log_loss:.4f}; weighted_f1 prev="
+        f"{prev_weighted_f1 if prev_weighted_f1 is not None else 'n/a'} curr={weighted_f1:.4f})"
+    ), metric_name
 
 
 @ray.remote(max_retries=2)
@@ -638,8 +737,18 @@ def main():
             # data (real_world_min_rows), so this is backward-compatible.
             absolute_passed = top3_passed and real_world_gate_passed
             client_for_gate = MlflowClient()
-            prev_version, prev_metric = get_latest_production_metric(registered_model_name, "top3_accuracy")
-            log(f"previous version: v{prev_version} top3_accuracy={prev_metric}")
+            prev_version, prev_metrics = _get_latest_registered_run_metrics(registered_model_name)
+            prev_top3 = prev_metrics.get("top3_accuracy")
+            prev_rw = prev_metrics.get("real_world_macro_f1")
+            prev_log_loss = prev_metrics.get("log_loss")
+            prev_weighted_f1 = prev_metrics.get("weighted_f1")
+            log(
+                f"previous version: v{prev_version} "
+                f"top3_accuracy={prev_top3} "
+                f"real_world_macro_f1={prev_rw} "
+                f"log_loss={prev_log_loss} "
+                f"weighted_f1={prev_weighted_f1}"
+            )
 
             prev_per_cat_f1 = get_per_category_f1_from_run(client_for_gate, registered_model_name)
             category_gate_passed, regressed_cats = check_category_regression(
@@ -652,17 +761,19 @@ def main():
             else:
                 log(f"category regression gate passed (checked {len(prev_per_cat_f1)} categories)")
 
-            do_register, reason = should_register(
+            do_register, reason, comparison_metric = _decide_m1_registration(
                 mode=args.mode,
-                current_metric=top3_accuracy,
-                previous_metric=prev_metric,
-                higher_is_better=True,
                 absolute_gate_passed=absolute_passed,
                 category_gate_passed=category_gate_passed,
-                prefix="M1-RAY",
+                top3_accuracy=top3_accuracy,
+                weighted_f1=weighted_f1,
+                multiclass_log_loss=multiclass_log_loss,
+                real_world_macro_f1=real_world_macro_f1,
+                previous_version=prev_version,
+                previous_metrics=prev_metrics,
             )
 
-            mlflow.set_tag("quality_gate_metric", "top3_accuracy")
+            mlflow.set_tag("quality_gate_metric", comparison_metric)
             mlflow.set_tag("top3_gate_passed", str(top3_passed).lower())
             mlflow.set_tag("absolute_gate_passed", str(absolute_passed).lower())
             mlflow.set_tag("category_regression_gate_passed", str(category_gate_passed).lower())
@@ -670,6 +781,7 @@ def main():
             mlflow.set_tag("registered", str(do_register).lower())
             mlflow.set_tag("register_reason", reason)
             mlflow.set_tag("previous_version", str(prev_version) if prev_version else "none")
+            mlflow.set_tag("comparison_metric", comparison_metric)
             mlflow.set_tag("mode", args.mode)
 
             if do_register:

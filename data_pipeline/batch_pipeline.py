@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+import re
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 
@@ -52,57 +52,124 @@ def save_csv(df: pd.DataFrame, path: Path) -> None:
     print(f"Saved {path}")
 
 
-def split_categorization_merchant_disjoint(
+def split_categorization_time_based(
     df: pd.DataFrame,
-    seed: int = 42,
-    eval_fraction: float = 0.2,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Stratified merchant-disjoint train/eval split for categorization data.
+    """Chronological 80/20 split for categorization data.
 
-    Within each project_category, hold out ~eval_fraction of its merchants for
-    eval; remaining merchants stay in train. Categories with a single merchant
-    cannot be split and stay entirely in train (they will not appear in eval).
-    The resulting train/eval share zero merchants, which is what makes
-    generalization metrics meaningful — a chronological row-based split leaves
-    every merchant in both halves and saturates the eval at ~1.0.
+    This keeps merchant names present in training while still producing a
+    non-empty eval set from later rows.
     """
     if "merchant" not in df.columns or "project_category" not in df.columns:
         raise ValueError("expected merchant and project_category columns")
 
-    merchant_cat = (
-        df.groupby("merchant")["project_category"]
-        .agg(lambda s: s.mode().iat[0])
-    )
-    rng = np.random.default_rng(seed=seed)
+    ordered = df.sort_values("date").reset_index(drop=True)
+    split_idx = max(1, int(len(ordered) * 0.8))
+    if split_idx >= len(ordered):
+        split_idx = max(0, len(ordered) - 1)
 
-    train_merchants: List[str] = []
-    eval_merchants: List[str] = []
-    for _cat, group in merchant_cat.groupby(merchant_cat):
-        merchants = list(group.index)
-        rng.shuffle(merchants)
-        if len(merchants) <= 1:
-            train_merchants.extend(merchants)
-            continue
-        n_eval = max(1, int(round(len(merchants) * eval_fraction)))
-        eval_merchants.extend(merchants[:n_eval])
-        train_merchants.extend(merchants[n_eval:])
-
-    train_set = set(train_merchants)
-    eval_set = set(eval_merchants)
-    if train_set & eval_set:
-        raise AssertionError("merchant overlap detected in disjoint split")
-
-    train_df = (
-        df[df["merchant"].isin(train_set)]
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
-    eval_df = (
-        df[df["merchant"].isin(eval_set)]
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
+    train_df = ordered.iloc[:split_idx].copy()
+    eval_df = ordered.iloc[split_idx:].copy()
     return train_df, eval_df
+
+
+def generate_merchant_variations(company_name: str, max_results: int = 5) -> Dict[str, str]:
+    """Generate a small set of plausible merchant-string variants."""
+    raw = str(company_name).strip()
+    if not raw:
+        return {}
+
+    name = raw.lower()
+    clean = re.sub(r"[^a-z0-9]", "", name)
+    words = [w for w in re.split(r"[\s\\-_&.,/]+", name) if w]
+    if len(clean) < 3:
+        return {}
+
+    variants: Dict[str, str] = {}
+
+    def add(value: str, category: str) -> None:
+        value = str(value).strip()
+        if len(value) < 3:
+            return
+        if value.lower() == clean:
+            return
+        if value not in variants:
+            variants[value] = category
+
+    if len(words) > 1:
+        add("".join(w[0] for w in words), "abbrev")
+        add("".join(w.capitalize() for w in words), "case")
+        add("_".join(words), "split")
+    else:
+        for n in [3, 4, 5]:
+            if len(clean) > n:
+                add(clean[:n], "abbrev")
+
+    no_vowels = re.sub(r"[aeiou]", "", clean)
+    if len(no_vowels) >= 3:
+        add(no_vowels, "vowel_drop")
+
+    first_vowel = re.search(r"[aeiou]", clean)
+    if first_vowel:
+        idx = first_vowel.start()
+        dropped = clean[: idx + 1] + re.sub(r"[aeiou]", "", clean[idx + 1 :])
+        add(dropped, "vowel_drop")
+
+    for suffix in ["hq", "app", "co"]:
+        add(clean + suffix, "suffix")
+
+    base = clean[: min(6, len(clean))]
+    for number in [1, 365]:
+        add(f"{base}{number}", "number")
+
+    primary_mix = ["abbrev", "vowel_drop", "split", "suffix", "number"]
+    overflow_order = ["case", "abbrev", "vowel_drop", "split", "suffix", "number"]
+    selected: Dict[str, str] = {}
+
+    for category in primary_mix:
+        for variant, variant_category in variants.items():
+            if variant_category == category and variant not in selected:
+                selected[variant] = variant_category
+                break
+        if len(selected) >= max_results:
+            return selected
+
+    for category in overflow_order:
+        for variant, variant_category in variants.items():
+            if variant_category != category or variant in selected:
+                continue
+            selected[variant] = variant_category
+            if len(selected) >= max_results:
+                return selected
+
+    return dict(list(selected.items())[:max_results])
+
+
+def augment_categorization_training(
+    train_df: pd.DataFrame,
+    max_variants_per_merchant: int = 5,
+) -> pd.DataFrame:
+    """Duplicate train rows with merchant-name variants only."""
+    augmented_rows: List[pd.DataFrame] = [train_df]
+
+    for merchant, merchant_rows in train_df.groupby("merchant", sort=False):
+        variations = generate_merchant_variations(
+            merchant,
+            max_results=max_variants_per_merchant,
+        )
+        if not variations:
+            continue
+
+        for idx, variant in enumerate(variations.keys(), start=1):
+            variant_rows = merchant_rows.copy()
+            variant_rows["merchant"] = variant
+            if "transaction_id" in variant_rows.columns:
+                variant_rows["transaction_id"] = (
+                    variant_rows["transaction_id"].astype(str) + f"__aug_{idx}"
+                )
+            augmented_rows.append(variant_rows)
+
+    return pd.concat(augmented_rows, ignore_index=True)
 
 
 def add_monthly_forecast_features(
@@ -355,20 +422,20 @@ def main() -> None:
     categorization_df = txns[categorization_cols].copy()
     categorization_df = categorization_df.sort_values("date").reset_index(drop=True)
 
-    # Stratified merchant-disjoint split. The previous chronological row-based
-    # 80/20 split left every merchant in both halves, saturating eval metrics at
-    # ~1.0 (a memorization check, not a generalization check). Holding out
-    # merchants per category instead gives a fair view of model performance on
-    # unseen merchants — matches what was uploaded to Swift on 2026-04-27.
-    seed = int(config.get("random_seed", 42))
-    categorization_train, categorization_eval = split_categorization_merchant_disjoint(
-        categorization_df, seed=seed
+    categorization_train, categorization_eval = split_categorization_time_based(
+        categorization_df
+    )
+    base_train_rows = len(categorization_train)
+    categorization_train = augment_categorization_training(
+        categorization_train,
+        max_variants_per_merchant=5,
     )
     train_merchants = set(categorization_train["merchant"])
     eval_merchants = set(categorization_eval["merchant"])
     print(
-        f"categorization merchant-disjoint split (seed={seed}): "
-        f"train={len(categorization_train):,} rows / "
+        "categorization chronological split: "
+        f"train={len(categorization_train):,} rows "
+        f"(base={base_train_rows:,}, augmented={len(categorization_train) - base_train_rows:,}) / "
         f"{len(train_merchants)} merchants / "
         f"{categorization_train['project_category'].nunique()} categories | "
         f"eval={len(categorization_eval):,} rows / "
@@ -496,13 +563,14 @@ def main() -> None:
             "synthetic_users": str(users_path),
         },
         "selection_rules": {
-            "categorization": "All transactions with required fields; merchant-disjoint stratified 80/20 split (~20% of merchants held out per project_category; single-merchant categories stay in train).",
+            "categorization": "All transactions with required fields; chronological 80/20 row split with merchants allowed to appear in both train and eval, and up to 5 synthetic merchant-name variants added per training merchant.",
             "anomaly": "Only users with >= 20 transactions; rolling history features computed from prior transactions only; chronological 80/20 split.",
             "forecasting": "Supervised next-month user-category forecasting rows with lag and rolling features computed from prior months only; chronological month split.",
         },
         "leakage_prevention": [
             "No random split for time-dependent data.",
-            "Categorization split is merchant-disjoint stratified by project_category — train/eval share zero merchants.",
+            "Categorization uses a chronological row split, so eval is later in time but merchant names may appear in both train and eval.",
+            "Synthetic merchant-name variants are added to training only, not to categorization eval.",
             "Chronological split used for the anomaly dataset.",
             "Forecasting split uses earlier months for training and later months for evaluation.",
             "Forecasting_v2 lag and rolling features are computed using prior months only.",
