@@ -1334,9 +1334,9 @@
       "title": "Top Correction Paths",
       "type": "table",
       "gridPos": {
-        "x": 0,
-        "y": 52,
-        "w": 24,
+        "x": 12,
+        "y": 44,
+        "w": 12,
         "h": 8
       },
       "options": {
