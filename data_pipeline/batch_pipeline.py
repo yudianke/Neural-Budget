@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 
 
@@ -48,6 +50,59 @@ def ensure_dir(path: Path) -> None:
 def save_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False)
     print(f"Saved {path}")
+
+
+def split_categorization_merchant_disjoint(
+    df: pd.DataFrame,
+    seed: int = 42,
+    eval_fraction: float = 0.2,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Stratified merchant-disjoint train/eval split for categorization data.
+
+    Within each project_category, hold out ~eval_fraction of its merchants for
+    eval; remaining merchants stay in train. Categories with a single merchant
+    cannot be split and stay entirely in train (they will not appear in eval).
+    The resulting train/eval share zero merchants, which is what makes
+    generalization metrics meaningful — a chronological row-based split leaves
+    every merchant in both halves and saturates the eval at ~1.0.
+    """
+    if "merchant" not in df.columns or "project_category" not in df.columns:
+        raise ValueError("expected merchant and project_category columns")
+
+    merchant_cat = (
+        df.groupby("merchant")["project_category"]
+        .agg(lambda s: s.mode().iat[0])
+    )
+    rng = np.random.default_rng(seed=seed)
+
+    train_merchants: List[str] = []
+    eval_merchants: List[str] = []
+    for _cat, group in merchant_cat.groupby(merchant_cat):
+        merchants = list(group.index)
+        rng.shuffle(merchants)
+        if len(merchants) <= 1:
+            train_merchants.extend(merchants)
+            continue
+        n_eval = max(1, int(round(len(merchants) * eval_fraction)))
+        eval_merchants.extend(merchants[:n_eval])
+        train_merchants.extend(merchants[n_eval:])
+
+    train_set = set(train_merchants)
+    eval_set = set(eval_merchants)
+    if train_set & eval_set:
+        raise AssertionError("merchant overlap detected in disjoint split")
+
+    train_df = (
+        df[df["merchant"].isin(train_set)]
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    eval_df = (
+        df[df["merchant"].isin(eval_set)]
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    return train_df, eval_df
 
 
 def add_monthly_forecast_features(
@@ -300,9 +355,27 @@ def main() -> None:
     categorization_df = txns[categorization_cols].copy()
     categorization_df = categorization_df.sort_values("date").reset_index(drop=True)
 
-    split_idx = int(len(categorization_df) * 0.8)
-    categorization_train = categorization_df.iloc[:split_idx].copy()
-    categorization_eval = categorization_df.iloc[split_idx:].copy()
+    # Stratified merchant-disjoint split. The previous chronological row-based
+    # 80/20 split left every merchant in both halves, saturating eval metrics at
+    # ~1.0 (a memorization check, not a generalization check). Holding out
+    # merchants per category instead gives a fair view of model performance on
+    # unseen merchants — matches what was uploaded to Swift on 2026-04-27.
+    seed = int(config.get("random_seed", 42))
+    categorization_train, categorization_eval = split_categorization_merchant_disjoint(
+        categorization_df, seed=seed
+    )
+    train_merchants = set(categorization_train["merchant"])
+    eval_merchants = set(categorization_eval["merchant"])
+    print(
+        f"categorization merchant-disjoint split (seed={seed}): "
+        f"train={len(categorization_train):,} rows / "
+        f"{len(train_merchants)} merchants / "
+        f"{categorization_train['project_category'].nunique()} categories | "
+        f"eval={len(categorization_eval):,} rows / "
+        f"{len(eval_merchants)} merchants / "
+        f"{categorization_eval['project_category'].nunique()} categories | "
+        f"merchant overlap: {len(train_merchants & eval_merchants)}"
+    )
 
     save_csv(categorization_train, batch_dir / "categorization_train.csv")
     save_csv(categorization_eval, batch_dir / "categorization_eval.csv")
@@ -425,13 +498,14 @@ def main() -> None:
             "synthetic_users": str(users_path),
         },
         "selection_rules": {
-            "categorization": "All transactions with required fields; chronological 80/20 split.",
+            "categorization": "All transactions with required fields; merchant-disjoint stratified 80/20 split (~20% of merchants held out per project_category; single-merchant categories stay in train).",
             "anomaly": "Only users with >= 20 transactions; rolling history features computed from prior transactions only; chronological 80/20 split.",
             "forecasting": "Supervised next-month user-category forecasting rows with lag and rolling features computed from prior months only; chronological month split.",
         },
         "leakage_prevention": [
             "No random split for time-dependent data.",
-            "Chronological split used for categorization and anomaly datasets.",
+            "Categorization split is merchant-disjoint stratified by project_category — train/eval share zero merchants.",
+            "Chronological split used for the anomaly dataset.",
             "Forecasting split uses earlier months for training and later months for evaluation.",
             "Forecasting_v2 lag and rolling features are computed using prior months only.",
             "Anomaly historical features are computed using prior transactions only.",
