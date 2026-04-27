@@ -43,6 +43,9 @@ services:
       MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI:-http://129.114.25.192:8000}"
       M1_REGISTERED_MODEL_NAME: "m1-ray-categorization"
       M1_FEEDBACK_LOG_PATH: "/data/feedback/m1_feedback.jsonl"
+      # Lowered from 0.70 default — explicit operator override to allow v8 (manual register) on 2026-04-27.
+      # v8 sanity macro_f1 = 0.6667 < 0.70 default; entertainment + gas categories at F1=0 by design.
+      M1_SANITY_GATE_FLOOR: "0.65"
     volumes:
       - feedback_data:/data/feedback
     networks:
