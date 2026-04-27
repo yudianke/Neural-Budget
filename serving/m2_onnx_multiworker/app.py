@@ -27,7 +27,7 @@ from typing import List, Literal, Optional
 
 import numpy as np
 import onnxruntime as ort
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -52,6 +52,12 @@ CONTAMINATION = float(os.environ.get("M2_CONTAMINATION", "0.05"))
 # from the user's prior mean. Default 3σ matches the standard "outlier" cutoff.
 SPIKE_Z_THRESHOLD = float(os.environ.get("M2_SPIKE_Z_THRESHOLD", "3.0"))
 DEFAULT_FEEDBACK_LOG_PATH = "/data/feedback/m2_feedback.jsonl"
+M2_INFERENCE_LOG_PATH = Path(
+    os.environ.get("M2_INFERENCE_LOG_PATH", "/data/feedback/m2_inference_log.jsonl")
+)
+M2_REJECTED_LOG_PATH = Path(
+    os.environ.get("M2_REJECTED_LOG_PATH", "/data/feedback/m2_rejected_samples.jsonl")
+)
 # Committed model.onnx — used as fallback when MLflow is unreachable
 FALLBACK_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
 # MLflow config
@@ -310,6 +316,59 @@ def _update_version_gauge() -> None:
 
 _update_version_gauge()
 
+
+def _append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _reject_m2_sample(x: "M2Input", reason: str, detail: str) -> None:
+    _append_jsonl(
+        M2_REJECTED_LOG_PATH,
+        {
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "transaction_id": x.transaction_id,
+            "synthetic_user_id": x.synthetic_user_id,
+            "merchant": x.merchant,
+            "date": x.date,
+            "abs_amount": x.abs_amount,
+            "repeat_count": x.repeat_count,
+            "is_recurring_candidate": x.is_recurring_candidate,
+            "user_txn_index": x.user_txn_index,
+            "user_mean_abs_amount_prior": x.user_mean_abs_amount_prior,
+            "user_std_abs_amount_prior": x.user_std_abs_amount_prior,
+        },
+    )
+    raise HTTPException(status_code=400, detail=detail)
+
+
+def _validate_m2_input(x: "M2Input") -> None:
+    merchant = str(x.merchant or "").strip()
+
+    if not merchant:
+        _reject_m2_sample(x, "empty_merchant", "merchant cannot be empty")
+
+    if x.abs_amount <= 0:
+        _reject_m2_sample(x, "non_positive_abs_amount", "abs_amount must be positive")
+
+    if x.abs_amount > 100000:
+        _reject_m2_sample(x, "abs_amount_out_of_range", "abs_amount is out of allowed range")
+
+    if x.repeat_count < 0:
+        _reject_m2_sample(x, "negative_repeat_count", "repeat_count cannot be negative")
+
+    if x.user_txn_index < 0:
+        _reject_m2_sample(x, "negative_user_txn_index", "user_txn_index cannot be negative")
+
+    if x.user_std_abs_amount_prior < 0:
+        _reject_m2_sample(
+            x,
+            "negative_user_std_abs_amount_prior",
+            "user_std_abs_amount_prior cannot be negative",
+        )
+
 # ---------------------------------------------------------------------------
 # Prediction counters for anomaly_rate gauge
 # ---------------------------------------------------------------------------
@@ -532,6 +591,8 @@ def metrics():
 # ---------------------------------------------------------------------------
 @app.post("/predict/anomaly", response_model=M2Output)
 def predict_anomaly(x: M2Input):
+    _validate_m2_input(x)
+
     features = np.array(
         [[
             x.abs_amount,
@@ -586,7 +647,7 @@ def predict_anomaly(x: M2Input):
         m2_rule_flags_total.labels(rule="subscription_jump").inc()
     _record_prediction(is_anomaly)
 
-    return M2Output(
+    result = M2Output(
         transaction_id=x.transaction_id,
         synthetic_user_id=x.synthetic_user_id,
         anomaly_score=anomaly_score,
@@ -600,6 +661,34 @@ def predict_anomaly(x: M2Input):
         badge_type=badge_type,
         model_version=_model_version,
     )
+
+    _append_jsonl(
+        M2_INFERENCE_LOG_PATH,
+        {
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            "stage": "m2_anomaly_inference",
+            "transaction_id": x.transaction_id,
+            "synthetic_user_id": x.synthetic_user_id,
+            "merchant": x.merchant,
+            "date": x.date,
+            "abs_amount": x.abs_amount,
+            "repeat_count": x.repeat_count,
+            "is_recurring_candidate": x.is_recurring_candidate,
+            "user_txn_index": x.user_txn_index,
+            "user_mean_abs_amount_prior": x.user_mean_abs_amount_prior,
+            "user_std_abs_amount_prior": x.user_std_abs_amount_prior,
+            "duplicate_within_24h": x.duplicate_within_24h,
+            "subscription_jump": x.subscription_jump,
+            "anomaly_score": result.anomaly_score,
+            "is_anomaly": result.is_anomaly,
+            "threshold": result.threshold,
+            "rule_flags": result.rule_flags.model_dump(),
+            "badge_type": result.badge_type,
+            "model_version": result.model_version,
+        },
+    )
+
+    return result
 
 
 # ---------------------------------------------------------------------------

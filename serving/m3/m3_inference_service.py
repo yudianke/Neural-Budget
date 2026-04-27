@@ -18,10 +18,13 @@ Endpoints:
     GET  /metrics                        Prometheus metrics
     GET  /metrics/forecast-accuracy      Per-category MAE vs actuals for a model version
 """
+import json
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import joblib
@@ -29,7 +32,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 import requests as http_requests
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from mlflow.tracking import MlflowClient
 from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -52,6 +55,12 @@ MODEL_VER    = os.environ.get("M3_MODEL_VERSION")   # None = latest
 # URL to the ActualBudget monthly-history export (called by /metrics/forecast-accuracy).
 # When set, the endpoint fetches real actuals from ActualBudget to compute in-production MAE.
 ACTUALS_URL  = os.environ.get("M3_ACTUALS_URL", "")
+M3_INFERENCE_LOG_PATH = Path(
+    os.getenv("M3_INFERENCE_LOG_PATH", "/data/m3_feedback/m3_inference.jsonl")
+)
+M3_REJECTED_LOG_PATH = Path(
+    os.getenv("M3_REJECTED_LOG_PATH", "/data/m3_feedback/m3_rejected.jsonl")
+)
 
 # ---------------------------------------------------------------------------
 # Model globals (populated by load())
@@ -68,6 +77,40 @@ _degraded      = False
 M3_PREDICTIONS = Counter("m3_predictions_total", "M3 forecast requests served", ["n_categories"])
 M3_LATENCY     = Histogram("m3_forecast_latency_seconds", "Forecast request latency")
 M3_MODEL_VER   = Gauge("m3_model_version_numeric", "Loaded model version (int)")
+
+
+def _append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _reject(row: "ForecastFeatureRow", reason: str, detail: str) -> None:
+    _append_jsonl(
+        M3_REJECTED_LOG_PATH,
+        {
+            "timestamp": time.time(),
+            "reason": reason,
+            "detail": detail,
+            "input": row.model_dump(),
+        },
+    )
+    raise HTTPException(status_code=400, detail=detail)
+
+
+def _validate(row: "ForecastFeatureRow") -> None:
+    if not row.project_category:
+        _reject(row, "empty_category", "project_category required")
+    if row.history_month_count < 3:
+        _reject(row, "insufficient_history", "history < 3 months")
+    if row.monthly_spend < 0:
+        _reject(row, "negative_spend", "monthly_spend cannot be negative")
+    if row.monthly_spend > 100000:
+        _reject(row, "outlier_spend", "monthly_spend too large")
+    if not 1 <= row.month_num <= 12:
+        _reject(row, "invalid_month", "month must be 1-12")
+    if not 1 <= row.quarter <= 4:
+        _reject(row, "invalid_quarter", "quarter must be 1-4")
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +289,10 @@ def forecast_from_features(request: ForecastFeaturesRequest):
     if not request.rows:
         return ForecastFeaturesResponse(forecasts=[], model_name=_model_name)
 
+    for row in request.rows:
+        _validate(row)
+
+    start = time.time()
     rows_df = pd.DataFrame([row.model_dump() for row in request.rows])
     categories = rows_df["project_category"].tolist()
 
@@ -265,8 +312,19 @@ def forecast_from_features(request: ForecastFeaturesRequest):
     # Sort descending by forecast amount
     forecasts.sort(key=lambda f: f.forecast or 0, reverse=True)
 
+    M3_LATENCY.observe(time.time() - start)
     M3_PREDICTIONS.labels(n_categories=str(len(forecasts))).inc()
     logger.info("Forecast for %d categories (model v%s)", len(forecasts), _model_version)
+
+    _append_jsonl(
+        M3_INFERENCE_LOG_PATH,
+        {
+            "timestamp": time.time(),
+            "model_version": _model_version,
+            "input": [row.model_dump() for row in request.rows],
+            "output": [forecast.model_dump() for forecast in forecasts],
+        },
+    )
 
     # Derive the forecast_month from the first row's year/month_num fields (best effort).
     # Logged asynchronously so it never blocks the response.
