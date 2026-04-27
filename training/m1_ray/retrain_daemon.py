@@ -184,10 +184,10 @@ def _run_retrain() -> bool:
     env["M1_FEEDBACK_INPUT"] = str(FEEDBACK_PATH)
     # #8: shell script reads M1_FEEDBACK_DATASET, not M1_FEEDBACK_OUTPUT
     env["M1_FEEDBACK_DATASET"] = str(FEEDBACK_PATH.parent / "m1_feedback_dataset.csv")
-     env["M1_RAY_CONFIG"] = CONFIG_PATH
-     if BOOTSTRAP_PATH:
-         env["M1_RAY_DATA_PATH"] = BOOTSTRAP_PATH
-     env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
+    env["M1_RAY_CONFIG"] = CONFIG_PATH
+    if BOOTSTRAP_PATH:
+        env["M1_RAY_DATA_PATH"] = BOOTSTRAP_PATH
+    env["MLFLOW_TRACKING_URI"] = MLFLOW_URI
 
     log.info("Starting retraining...")
     try:
