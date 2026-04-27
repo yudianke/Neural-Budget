@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+import json
 import os
 import threading
+import time
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Gauge, Histogram
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -80,6 +83,51 @@ M1_EVAL_CATEGORY_F1 = Gauge(
 
 _model_ready = False
 CONFIDENCE_THRESHOLD = 0.6
+INFERENCE_LOG_PATH = Path(os.getenv("M1_INFERENCE_LOG_PATH", "/data/feedback/m1_inference_log.jsonl"))
+REJECTED_LOG_PATH = Path(os.getenv("M1_REJECTED_LOG_PATH", "/data/feedback/m1_rejected_samples.jsonl"))
+
+
+def _append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def _validate_input_for_prediction(request: M1Input) -> None:
+    merchant = str(request.merchant).strip()
+
+    if not merchant:
+        _append_jsonl(REJECTED_LOG_PATH, {
+            "timestamp": time.time(),
+            "reason": "empty_merchant",
+            "transaction_id": request.transaction_id,
+            "synthetic_user_id": request.synthetic_user_id,
+            "merchant": request.merchant,
+            "amount": request.amount,
+        })
+        raise HTTPException(status_code=400, detail="merchant cannot be empty")
+
+    if request.amount == 0:
+        _append_jsonl(REJECTED_LOG_PATH, {
+            "timestamp": time.time(),
+            "reason": "zero_amount",
+            "transaction_id": request.transaction_id,
+            "synthetic_user_id": request.synthetic_user_id,
+            "merchant": request.merchant,
+            "amount": request.amount,
+        })
+        raise HTTPException(status_code=400, detail="amount cannot be zero")
+
+    if abs(request.amount) > 100000:
+        _append_jsonl(REJECTED_LOG_PATH, {
+            "timestamp": time.time(),
+            "reason": "amount_out_of_range",
+            "transaction_id": request.transaction_id,
+            "synthetic_user_id": request.synthetic_user_id,
+            "merchant": request.merchant,
+            "amount": request.amount,
+        })
+        raise HTTPException(status_code=400, detail="amount is out of allowed range")
 
 
 def _update_version_gauge():
@@ -207,7 +255,10 @@ def root():
 # ---------------------------------------------------------------------------
 @app.post("/predict/category", response_model=M1Output)
 def predict_category_endpoint(request: M1Input):
+    _validate_input_for_prediction(request)
+
     result = real_model.predict(request)
+
     M1_PREDICTIONS.labels(predicted_category=result.predicted_category).inc()
     M1_CONFIDENCE.observe(result.confidence)
     if result.predicted_category:
@@ -218,6 +269,28 @@ def predict_category_endpoint(request: M1Input):
         M1_LOW_CONFIDENCE_TOTAL.inc()
     if result.auto_fill:
         M1_AUTO_FILL_TOTAL.inc()
+
+    _append_jsonl(INFERENCE_LOG_PATH, {
+        "timestamp": time.time(),
+        "stage": "m1_inference",
+        "transaction_id": request.transaction_id,
+        "synthetic_user_id": request.synthetic_user_id,
+        "merchant": request.merchant,
+        "amount": request.amount,
+        "transaction_type": request.transaction_type,
+        "account_type": request.account_type,
+        "day_of_week": request.day_of_week,
+        "day_of_month": request.day_of_month,
+        "month": request.month,
+        "log_abs_amount": request.log_abs_amount,
+        "historical_majority_category_for_payee": request.historical_majority_category_for_payee,
+        "predicted_category": result.predicted_category,
+        "confidence": result.confidence,
+        "top_3_suggestions": [x.model_dump() for x in result.top_3_suggestions],
+        "auto_fill": result.auto_fill,
+        "model_version": real_model._model_version,
+    })
+
     return result
 
 
