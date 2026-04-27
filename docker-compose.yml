@@ -306,3 +306,33 @@ services:
       - m2-serving
       - m3-serving
     restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Continuous Load Generator
+  # Runs indefinitely, sending realistic M1/M2/M3 traffic every CYCLE_SECONDS.
+  # Generates ~20% override feedback so the retrain daemon accumulates signal.
+  # Required for: April 29–May 3 "emulated load running continuously" milestone.
+  # --------------------------------------------------------------------------
+  load-generator:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.loadgen
+    image: load-generator:latest
+    container_name: load-generator
+    environment:
+      M1_URL: "http://m1-serving:8001"
+      M2_URL: "http://m2-serving:8003"
+      M3_URL: "http://m3-serving:8002"
+      CYCLE_SECONDS: "${LOAD_CYCLE_SECONDS:-30}"
+      FEEDBACK_DELAY_SECONDS: "8"
+      LOG_LEVEL: "INFO"
+    networks:
+      - ml-net
+    depends_on:
+      m1-serving:
+        condition: service_healthy
+      m2-serving:
+        condition: service_healthy
+      m3-serving:
+        condition: service_healthy
+    restart: unless-stopped
