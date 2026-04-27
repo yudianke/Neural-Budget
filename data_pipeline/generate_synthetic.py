@@ -1,21 +1,40 @@
+import json
+import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
-import json
-from pathlib import Path
 
 
 """
-combined the three datasets by using each for a different role in the synthetic data generation pipeline:
-fmli used to generate synthetic users (demographics and persona clusters)
-mtbi  used to learn spending distributions across categories
-moneydata  used to model transaction-level behavior (merchants, amounts, timing)
+Synthetic transaction generator for NeuralBudget.
+
+Data source roles:
+- FMLI: generate synthetic users, demographics, and persona clusters
+- MTBI: learn household spending distributions across categories
+- MoneyData: learn transaction-level behavior: merchants, amounts, timing
+
+Outputs:
+- synthetic_users.csv
+- synthetic_transactions.csv
+- moneydata_labeled.csv
+- ces_household_category_spend.csv
+- generation_manifest.json
+- data_quality_report.json
 """
 
 
 def load_config(config_path: str = "data_pipeline/manifest.json") -> dict:
     with open(config_path, "r") as f:
         return json.load(f)
+
+
+def normalize_merchant_name(merchant: str) -> str:
+    merchant = str(merchant).upper().strip()
+    merchant = re.sub(r"[^A-Z0-9&.\s-]", " ", merchant)
+    merchant = re.sub(r"\s+", " ", merchant)
+    return merchant.strip()
 
 
 def map_ucc_to_category(ucc) -> str:
@@ -56,16 +75,27 @@ def map_ucc_to_category(ucc) -> str:
         return "taxes"
     if 800000 <= ucc < 900000:
         return "cash_transfers"
+
     return "misc"
 
 
 MANUAL_MERCHANT_MAP = {
-    "LIDL GB  NOTTINGHA": "groceries",
+    # Groceries
     "LIDL GB NOTTINGHAM": "groceries",
+    "LIDL GB NOTTINGHA": "groceries",
     "LNK TESCO FABIAN W": "groceries",
     "ORIENTAL MART HYDR": "groceries",
     "MARKS&SPENCER PLC": "groceries",
     "LNK M&S SWANSEA": "groceries",
+    "TESCO STORES": "groceries",
+    "SAINSBURYS": "groceries",
+    "WHOLE FOODS MARKET": "groceries",
+    "ASSOCIATED SUPERMARKET": "groceries",
+    "TRADER JOES": "groceries",
+    "KEY FOOD MARKET": "groceries",
+    "FOOD BAZAAR": "groceries",
+
+    # Shopping
     "AMAZON UK MARKETPL": "shopping",
     "AMZNMKTPLACE": "shopping",
     "AMAZON UK RETAIL": "shopping",
@@ -73,25 +103,45 @@ MANUAL_MERCHANT_MAP = {
     "AMAZON SVCS EU-UK": "shopping",
     "AMAZON UK RETAIL A": "shopping",
     "AMAZON SVCS EUROPE": "shopping",
+    "TARGET STORE": "shopping",
+    "WALMART": "shopping",
+
+    # Education
     "LNK UNI - UNIVERSI": "education",
     "LOYD WALES UNIV SW": "education",
     "SWANSEA UNIVERSITY": "education",
     "SWANSEA UNI - PAY": "education",
     "UNIV OF NOTTINGHAM": "education",
+
+    # Utilities
     "VIRGIN MEDIA PYMTS": "utilities",
     "DWR CYMRU W WATER": "utilities",
     "GOOD ENERGY LTD": "utilities",
     "TALKTALK LIMITED": "utilities",
     "O2": "utilities",
     "CC SWANSEA C.TAX": "utilities",
+
+    # Transport
+    "UBER TRIP": "transport",
+    "UBER *TRIP": "transport",
     "UBER   *TRIP": "transport",
     "ARRIVA TRAINS WALE": "transport",
+    "EAST MIDS RAILWAY": "transport",
+
+    # Insurance
     "ASSURANT INTER LTD": "insurance",
     "LV LIFE": "insurance",
     "ZURICH": "insurance",
+
+    # Restaurants
     "TAMBA TAM": "restaurants",
     "SUBWAY 32610 MIDLA": "restaurants",
     "BRONTOSAURUS VEGAN": "restaurants",
+    "CHIPOTLE": "restaurants",
+    "SHAKE SHACK": "restaurants",
+    "FOOD COURT": "restaurants",
+
+    # Misc
     "TRADING212UK": "misc",
     "WWW.III.CO.UK DE": "misc",
     "NON-GBP TRANS FEE": "misc",
@@ -112,31 +162,185 @@ MANUAL_MERCHANT_MAP = {
 }
 
 
+EXTRA_MERCHANTS = {
+    "groceries": [
+        "WHOLE FOODS MARKET",
+        "ASSOCIATED SUPERMARKET",
+        "TRADER JOES",
+        "KEY FOOD MARKET",
+        "STOP AND SHOP",
+        "FOOD BAZAAR",
+        "FARMERS MARKET",
+        "BROOKLYN SUPERMARKET",
+        "LOCAL GROCERY",
+        "GREEN MARKET",
+    ],
+    "restaurants": [
+        "CHIPOTLE",
+        "SHAKE SHACK",
+        "LOCAL CAFE",
+        "FOOD COURT",
+        "PIZZA PLACE",
+        "BURGER HOUSE",
+        "COFFEE BAR",
+        "NOODLE SHOP",
+    ],
+    "shopping": [
+        "TARGET STORE",
+        "WALMART",
+        "AMAZON MARKETPLACE",
+        "BEST BUY",
+        "HOME GOODS",
+        "ONLINE RETAIL",
+    ],
+    "transport": [
+        "UBER TRIP",
+        "LYFT RIDE",
+        "MTA METROCARD",
+        "RAIL TICKET",
+        "BUS TRANSIT",
+        "TRAINLINE",
+    ],
+    "utilities": [
+        "ELECTRIC COMPANY",
+        "WATER BILL",
+        "INTERNET SERVICE",
+        "MOBILE PHONE BILL",
+        "GAS UTILITY",
+    ],
+    "entertainment": [
+        "NETFLIX",
+        "SPOTIFY",
+        "AUDIBLE",
+        "AMC CINEMA",
+        "THEATRE TICKET",
+    ],
+    "healthcare": [
+        "CVS PHARMACY",
+        "WALGREENS PHARMACY",
+        "DENTAL CLINIC",
+        "MEDICAL CENTER",
+    ],
+    "gas": [
+        "SHELL GAS",
+        "BP FUEL",
+        "EXXON",
+        "MOBIL GAS",
+    ],
+}
+
+
 def map_merchant_keyword_fallback(merchant: str) -> str:
     m = merchant.lower()
 
-    if any(x in m for x in ["tesco", "lidl", "sainsbury", "aldi", "marks&spencer", "m&s", "oriental mart", "coop", "co-op"]):
+    # Groceries first, before shopping, because names like "food market"
+    # should not become shopping.
+    if any(
+        x in m
+        for x in [
+            "supermarket",
+            "grocery",
+            "groceries",
+            "whole foods",
+            "trader joe",
+            "tesco",
+            "lidl",
+            "sainsbury",
+            "aldi",
+            "food bazaar",
+            "key food",
+            "farmers market",
+            "green market",
+            "m&s",
+            "marks&spencer",
+            "oriental mart",
+            "co-op",
+            "coop",
+        ]
+    ):
         return "groceries"
 
-    if any(x in m for x in ["subway", "pizza", "cafe", "coffee", "restaurant", "kfc", "mcdonald", "burger", "vegan", "tamba"]):
+    if any(
+        x in m
+        for x in [
+            "subway",
+            "pizza",
+            "cafe",
+            "coffee",
+            "restaurant",
+            "kfc",
+            "mcdonald",
+            "burger",
+            "vegan",
+            "tamba",
+            "chipotle",
+            "shake shack",
+            "food court",
+        ]
+    ):
         return "restaurants"
 
-    if any(x in m for x in ["amazon", "marketpl", "retail", "shop", "store"]):
+    # Avoid generic "store" as a shopping signal.
+    if any(
+        x in m
+        for x in [
+            "amazon",
+            "marketplace",
+            "marketpl",
+            "retail",
+            "target",
+            "walmart",
+            "best buy",
+            "home goods",
+            "online retail",
+        ]
+    ):
         return "shopping"
 
-    if any(x in m for x in ["media", "water", "energy", "electric", "talktalk", "broadband", "mobile", "phone", "o2", "c.tax", "council tax"]):
+    if any(
+        x in m
+        for x in [
+            "media",
+            "water",
+            "energy",
+            "electric",
+            "talktalk",
+            "broadband",
+            "mobile",
+            "phone",
+            "o2",
+            "c.tax",
+            "council tax",
+            "internet",
+            "utility",
+        ]
+    ):
         return "utilities"
 
-    if any(x in m for x in ["uber", "train", "rail", "bus", "arriva", "travel", "transport"]):
+    if any(
+        x in m
+        for x in [
+            "uber",
+            "lyft",
+            "train",
+            "rail",
+            "bus",
+            "arriva",
+            "travel",
+            "transport",
+            "metrocard",
+            "mta",
+        ]
+    ):
         return "transport"
 
-    if any(x in m for x in ["shell", "petrol", "fuel", "esso", "bp "]):
+    if any(x in m for x in ["shell", "petrol", "fuel", "esso", "bp gas", "mobil"]):
         return "gas"
 
     if any(x in m for x in ["assurant", "lv life", "zurich", "insurance"]):
         return "insurance"
 
-    if any(x in m for x in ["university", "uni ", "college", "nottingham", "swansea"]):
+    if any(x in m for x in ["university", "college", "school", "tuition"]):
         return "education"
 
     if any(x in m for x in ["spotify", "netflix", "audible", "prime", "cinema", "theatre"]):
@@ -149,6 +353,7 @@ def map_merchant_keyword_fallback(merchant: str) -> str:
 
 
 def assign_moneydata_category(merchant: str) -> str:
+    merchant = normalize_merchant_name(merchant)
     if merchant in MANUAL_MERCHANT_MAP:
         return MANUAL_MERCHANT_MAP[merchant]
     return map_merchant_keyword_fallback(merchant)
@@ -181,6 +386,7 @@ def generate_amounts(total_amount: float, n_txns: int, noise_ratio: float, rng: 
 
     base = total_amount / n_txns
     vals = []
+
     for _ in range(n_txns):
         noisy = rng.normal(loc=base, scale=max(base * noise_ratio, 1.0))
         vals.append(max(noisy, 1.0))
@@ -188,6 +394,73 @@ def generate_amounts(total_amount: float, n_txns: int, noise_ratio: float, rng: 
     vals = np.array(vals)
     vals = vals / vals.sum() * total_amount
     return np.round(vals, 2).tolist()
+
+
+def build_data_quality_report(synthetic_txns: pd.DataFrame, synthetic_users: pd.DataFrame) -> dict:
+    category_counts = synthetic_txns["project_category"].value_counts().to_dict()
+    merchant_count_by_category = (
+        synthetic_txns.groupby("project_category")["merchant"].nunique().to_dict()
+    )
+
+    amount = pd.to_numeric(synthetic_txns["amount"], errors="coerce")
+    abs_amount = amount.abs()
+
+    return {
+        "synthetic_user_count": int(synthetic_txns["synthetic_user_id"].nunique()),
+        "synthetic_transaction_count": int(len(synthetic_txns)),
+        "category_count": int(synthetic_txns["project_category"].nunique()),
+        "merchant_count": int(synthetic_txns["merchant"].nunique()),
+        "missing_merchant_rate": float(synthetic_txns["merchant"].isna().mean()),
+        "missing_category_rate": float(synthetic_txns["project_category"].isna().mean()),
+        "invalid_amount_count": int(amount.isna().sum()),
+        "positive_amount_rate": float((amount > 0).mean()),
+        "amount_p50": float(abs_amount.quantile(0.50)),
+        "amount_p95": float(abs_amount.quantile(0.95)),
+        "amount_p99": float(abs_amount.quantile(0.99)),
+        "category_distribution": {str(k): int(v) for k, v in category_counts.items()},
+        "merchant_count_by_category": {
+            str(k): int(v) for k, v in merchant_count_by_category.items()
+        },
+        "persona_cluster_distribution": {
+            str(k): int(v)
+            for k, v in synthetic_users["persona_cluster"].value_counts().to_dict().items()
+        },
+    }
+
+
+def validate_generated_data(synthetic_txns: pd.DataFrame) -> None:
+    required = {
+        "synthetic_user_id",
+        "date",
+        "merchant",
+        "project_category",
+        "transaction_type",
+        "amount",
+        "abs_amount",
+        "log_abs_amount",
+        "repeat_count",
+        "is_recurring_candidate",
+    }
+
+    missing = sorted(required - set(synthetic_txns.columns))
+    if missing:
+        raise ValueError(f"Generated transaction data missing columns: {missing}")
+
+    if synthetic_txns.empty:
+        raise ValueError("Generated transaction dataset is empty")
+
+    if synthetic_txns["merchant"].isna().mean() > 0.01:
+        raise ValueError("Too many missing merchants")
+
+    if synthetic_txns["project_category"].isna().mean() > 0.01:
+        raise ValueError("Too many missing project categories")
+
+    if synthetic_txns["project_category"].nunique() < 5:
+        raise ValueError("Too few categories generated")
+
+    invalid_amount_count = pd.to_numeric(synthetic_txns["amount"], errors="coerce").isna().sum()
+    if invalid_amount_count > 0:
+        raise ValueError(f"Invalid amount count: {invalid_amount_count}")
 
 
 def main() -> None:
@@ -200,7 +473,7 @@ def main() -> None:
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # CES
+    # CES data
     mtbi = pd.read_csv(mtbi_path)
     fmli = pd.read_csv(fmli_path)
 
@@ -233,6 +506,7 @@ def main() -> None:
 
     if "NEWID" in fmli.columns:
         fmli = fmli.rename(columns={"NEWID": "household_id"})
+
     ces_wide = ces_wide.merge(fmli, on="household_id", how="left")
 
     sample_weights = None
@@ -250,11 +524,13 @@ def main() -> None:
 
     synthetic = ces_wide.set_index("household_id").loc[sampled_households].reset_index()
     synthetic = synthetic.rename(columns={"household_id": "source_household_id"})
+
     synthetic.insert(
         0,
         "synthetic_user_id",
-        [f"user_{i+1}" for i in range(config["n_synthetic_users"])],
+        [f"user_{i + 1}" for i in range(config["n_synthetic_users"])],
     )
+
     synthetic["user_scale"] = rng.uniform(0.6, 1.6, size=len(synthetic))
 
     exclude_cols = {
@@ -266,6 +542,7 @@ def main() -> None:
         "FINLWT21",
         "user_scale",
     }
+
     category_cols = [c for c in synthetic.columns if c not in exclude_cols]
 
     for col in category_cols:
@@ -292,6 +569,7 @@ def main() -> None:
         synthetic["misc"] = synthetic["misc"].clip(upper=10000)
 
     cluster_features = [c for c in synthetic.columns if c not in exclude_cols]
+
     kmeans = KMeans(
         n_clusters=config["persona_clusters"],
         random_state=config["random_seed"],
@@ -302,14 +580,16 @@ def main() -> None:
     # MoneyData
     money_df = pd.read_csv(moneydata_path)
 
-    money_df = money_df.rename(columns={
-        "Transaction Date": "date",
-        "Transaction Type": "transaction_type",
-        "Transaction Description": "merchant",
-        "Debit Amount": "debit_amount",
-        "Credit Amount": "credit_amount",
-        "Balance": "balance",
-    })
+    money_df = money_df.rename(
+        columns={
+            "Transaction Date": "date",
+            "Transaction Type": "transaction_type",
+            "Transaction Description": "merchant",
+            "Debit Amount": "debit_amount",
+            "Credit Amount": "credit_amount",
+            "Balance": "balance",
+        }
+    )
     money_df.columns = [c.strip().lower() for c in money_df.columns]
 
     for col in ["debit_amount", "credit_amount", "balance"]:
@@ -321,13 +601,7 @@ def main() -> None:
     money_df["credit_amount"] = money_df["credit_amount"].fillna(0)
     money_df["amount"] = money_df["credit_amount"] - money_df["debit_amount"]
 
-    money_df["merchant"] = (
-        money_df["merchant"]
-        .fillna("UNKNOWN")
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
+    money_df["merchant"] = money_df["merchant"].fillna("UNKNOWN").apply(normalize_merchant_name)
     money_df["transaction_type"] = (
         money_df["transaction_type"]
         .fillna("UNKNOWN")
@@ -335,8 +609,8 @@ def main() -> None:
         .str.upper()
         .str.strip()
     )
-    money_df = money_df.dropna(subset=["date", "merchant"]).reset_index(drop=True)
 
+    money_df = money_df.dropna(subset=["date", "merchant"]).reset_index(drop=True)
     money_df["project_category"] = money_df["merchant"].apply(assign_moneydata_category)
 
     merchant_pool = (
@@ -345,7 +619,6 @@ def main() -> None:
         .to_dict()
     )
 
-    # Synthetic transactions
     frequency_rules = {
         "housing": {"monthly_txn_range": (1, 1), "amount_noise": 0.03},
         "utilities": {"monthly_txn_range": (1, 3), "amount_noise": 0.08},
@@ -364,16 +637,23 @@ def main() -> None:
     }
 
     def choose_merchant(category: str) -> str:
-        choices = merchant_pool.get(category, [])
+        base_choices = merchant_pool.get(category, [])
+        base_choices = list(base_choices[: min(100, len(base_choices))])
+
+        extra_choices = EXTRA_MERCHANTS.get(category, [])
+        choices = base_choices + extra_choices
+
         if len(choices) == 0:
             return f"{category.upper()}_MERCHANT"
-        return rng.choice(choices[: min(15, len(choices))])
+
+        return str(rng.choice(choices))
 
     months = pd.period_range(
         start=config["start_month"],
         end=config["end_month"],
         freq="M",
     )
+
     all_transactions = []
 
     for _, row in synthetic.iterrows():
@@ -387,7 +667,10 @@ def main() -> None:
                 continue
 
             monthly_budget = annual_spend / 12.0
-            freq_rule = frequency_rules.get(category, {"monthly_txn_range": (1, 4), "amount_noise": 0.25})
+            freq_rule = frequency_rules.get(
+                category,
+                {"monthly_txn_range": (1, 4), "amount_noise": 0.25},
+            )
 
             for period in months:
                 low, high = freq_rule["monthly_txn_range"]
@@ -396,28 +679,36 @@ def main() -> None:
                     continue
 
                 txn_dates = random_dates_in_month(period.year, period.month, n_txns, rng)
-                txn_amounts = generate_amounts(monthly_budget, n_txns, freq_rule["amount_noise"], rng)
+                txn_amounts = generate_amounts(
+                    monthly_budget,
+                    n_txns,
+                    freq_rule["amount_noise"],
+                    rng,
+                )
 
                 for txn_date, amt in zip(txn_dates, txn_amounts):
-                    all_transactions.append({
-                        "synthetic_user_id": user_id,
-                        "source_household_id": source_household_id,
-                        "persona_cluster": int(persona_cluster),
-                        "date": txn_date,
-                        "merchant": choose_merchant(category),
-                        "project_category": category,
-                        "transaction_type": choose_transaction_type(category, rng),
-                        "amount": -abs(float(amt)),
-                        "is_synthetic": 1,
-                    })
+                    all_transactions.append(
+                        {
+                            "synthetic_user_id": user_id,
+                            "source_household_id": source_household_id,
+                            "persona_cluster": int(persona_cluster),
+                            "date": txn_date,
+                            "merchant": choose_merchant(category),
+                            "project_category": category,
+                            "transaction_type": choose_transaction_type(category, rng),
+                            "amount": -abs(float(amt)),
+                            "is_synthetic": 1,
+                        }
+                    )
 
     synthetic_txns = pd.DataFrame(all_transactions)
+
     synthetic_txns = synthetic_txns.sort_values(
         ["synthetic_user_id", "date", "project_category"]
     ).reset_index(drop=True)
 
     synthetic_txns["transaction_id"] = [
-        f"txn_{i+1:09d}" for i in range(len(synthetic_txns))
+        f"txn_{i + 1:09d}" for i in range(len(synthetic_txns))
     ]
     synthetic_txns["abs_amount"] = synthetic_txns["amount"].abs()
     synthetic_txns["day_of_week"] = pd.to_datetime(synthetic_txns["date"]).dt.dayofweek
@@ -437,21 +728,26 @@ def main() -> None:
         on=["synthetic_user_id", "merchant", "abs_amount_rounded"],
         how="left",
     )
+
     synthetic_txns["is_recurring_candidate"] = (
         synthetic_txns["repeat_count"] >= 3
     ).astype(int)
 
-    # Save outputs
+    validate_generated_data(synthetic_txns)
+
     users_output = output_dir / "synthetic_users.csv"
     txns_output = output_dir / "synthetic_transactions.csv"
     money_output = output_dir / "moneydata_labeled.csv"
     ces_output = output_dir / "ces_household_category_spend.csv"
     manifest_output = output_dir / "generation_manifest.json"
+    quality_output = output_dir / "data_quality_report.json"
 
     synthetic.to_csv(users_output, index=False)
     synthetic_txns.to_csv(txns_output, index=False)
     money_df.to_csv(money_output, index=False)
     ces_long.to_csv(ces_output, index=False)
+
+    quality_report = build_data_quality_report(synthetic_txns, synthetic)
 
     manifest = {
         "n_synthetic_users": int(config["n_synthetic_users"]),
@@ -461,15 +757,27 @@ def main() -> None:
         "categories_used": sorted(category_cols),
         "random_seed": int(config["random_seed"]),
         "merchant_pool_categories": sorted(list(merchant_pool.keys())),
+        "merchant_diversity_total": int(synthetic_txns["merchant"].nunique()),
+        "quality_report_path": str(quality_output),
+        "notes": [
+            "Merchant diversity increased using top-100 MoneyData merchants per category plus hard-case merchants.",
+            "Generic keyword 'store' is intentionally not used as a shopping signal to reduce groceries/shopping confusion.",
+            "Generated data validated for schema, missingness, category coverage, and amount sanity.",
+        ],
     }
+
     with open(manifest_output, "w") as f:
         json.dump(manifest, f, indent=2)
+
+    with open(quality_output, "w") as f:
+        json.dump(quality_report, f, indent=2)
 
     print(f"Saved {users_output}")
     print(f"Saved {txns_output}")
     print(f"Saved {money_output}")
     print(f"Saved {ces_output}")
     print(f"Saved {manifest_output}")
+    print(f"Saved {quality_output}")
 
 
 if __name__ == "__main__":
