@@ -54,7 +54,7 @@ Predicts the spending category from payee name + amount when a transaction is im
 ### Model
 - **Features:** TF-IDF character n-grams (char_wb, config-driven range e.g. 1–3 with 1000 features for the baseline config) on normalized merchant, plus `log_amount`, `day_of_week`, `day_of_month`
 - **Algorithm:** XGBoost classifier, trained inside a Ray `@ray.remote` task so the orchestration layer matches the production retrain-daemon. Sparse CSR features are preserved end-to-end (missing-value semantics intact between train and serve)
-- **Training data:** Synthetic categorization CSV in Chameleon Swift (`neural-budget-data-proj16/processed/categorization_train.csv` ≈ 1.35M rows, `categorization_eval.csv` ≈ 339k rows). The older MoneyData sklearn baseline still lives under `training/m1/` as a fallback but is not retrained.
+- **Training data:** Synthetic categorization CSV in Chameleon Swift (`neural-budget-data-proj16/processed/categorization_train.csv`, `categorization_eval.csv`). Split is **chronological 80/20** on transaction date; the train half is then expanded with up to 5 synthetic merchant-name variants per merchant (abbreviation, vowel-drop, suffix, etc.) so the model sees the kinds of fuzzy strings real bank exports produce. Eval is left untouched. The older MoneyData sklearn baseline still lives under `training/m1/` as a fallback but is not retrained.
 - **Output:** `predicted_category`, `confidence`, `top_3_suggestions`, `auto_fill` flag
 
 ### Training
@@ -79,9 +79,9 @@ bash training/m1_ray/run_hypersearch.sh
 ```
 
 Promotion gates (all must pass to register):
-1. Absolute gate — macro-F1 ≥ `quality_gate_macro_f1` (default 0.65).
+1. Absolute gate — `top3_accuracy` ≥ configured floor, plus the real-world macro-F1 floor over user-feedback eval rows when enough rows are present.
 2. Per-category regression — no category's F1 may drop by more than 2% relative vs the previously registered version.
-3. Improvement — bootstrap mode skips improvement check; retrain mode requires improvement over previous registered macro-F1.
+3. Improvement — primary comparator is `real_world_macro_f1` when both current and previous versions have it, otherwise `top3_accuracy`. Ties within 1e-6 fall back to lower `log_loss`, then higher `weighted_f1`. The chosen comparator is logged on the run as `quality_gate_metric` / `comparison_metric`.
 
 Failing any gate skips registration (no rollback needed — the previous version stays in place).
 
@@ -111,7 +111,23 @@ docker run -p 8001:8001 \
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/metrics/feedback` | Aggregate feedback stats |
 | GET | `/metrics/feedback/since/{model_version}` | Feedback stats scoped to a specific model version (used by retrain-daemon rollback check) |
+| GET | `/metrics/evaluation` | Latest offline-eval results (sanity + synthetic) for the loaded model |
 | POST | `/admin/reload` | Hot-reload model from MLflow |
+| POST | `/admin/run-eval` | Re-run the offline eval gate on the currently loaded model |
+
+**Offline evaluation gate** (`serving/m1_baseline/offline_eval.py`):
+At model load time — and again on every `/admin/reload` — the server runs two held-out evals *before* marking the model active:
+1. **Sanity eval** — 17 hardcoded `merchant → category` cases (Subway → restaurants, Tesco → groceries, Spotify → entertainment, …). Floor: `M1_SANITY_GATE_FLOOR` (default `0.70`, lowered to `0.65` by operator override on the live deploy).
+2. **Synthetic eval** — pulls the `eval_data/eval_holdout.csv` artifact that `train_m1_ray.py` uploads to the MLflow run, samples up to `M1_EVAL_MAX_ROWS` (default 10k), and computes accuracy / macro-F1 / per-category F1 / top-5 confusions. Floor: `M1_SYNTHETIC_GATE_FLOOR` (default `0.85`).
+
+Behaviour:
+- **Fail-open on infra issues** (MLflow unreachable, artifact missing) — sanity still runs.
+- **Fail-closed on quality issues** — if either floor is missed, results are returned via `/metrics/evaluation` and `m1_eval_gate_passed` is set to `0`. The whole gate can be disabled with `M1_EVAL_GATE_ENABLED=false`.
+- Exposes Prometheus gauges `m1_eval_macro_f1`, `m1_eval_accuracy`, `m1_eval_gate_passed`, and `m1_eval_category_f1{category}` — wired into the M1 Grafana dashboard.
+
+**Input validation & lineage logging:**
+- `/predict/category` rejects empty merchant, zero amount, and `|amount| > 100k` with HTTP 400. Rejected requests are appended to `M1_REJECTED_LOG_PATH` (default `/data/feedback/m1_rejected_samples.jsonl`) with the reason.
+- Every successful prediction is appended to `M1_INFERENCE_LOG_PATH` (default `/data/feedback/m1_inference_log.jsonl`) — full request, prediction, top-3, and `model_version` — so the data pipeline can replay production traffic.
 
 **Serving variants:**
 - `serving/m1_baseline/` — FastAPI, CPU reference
@@ -201,6 +217,10 @@ docker run -p 8003:8003 \
 | GET | `/metrics/feedback/since/{version}` | Version-filtered stats for rollback check |
 | POST | `/admin/reload` | Hot-reload ONNX model from disk |
 | GET | `/metrics` | Prometheus metrics (multiprocess-safe) |
+
+**Input validation & lineage logging:**
+- `/predict/anomaly` rejects empty merchant, non-positive `abs_amount`, `abs_amount > 100k`, and any negative `repeat_count` / `user_txn_index` / `user_std_abs_amount_prior` with HTTP 400. Rejections go to `M2_REJECTED_LOG_PATH` (default `/data/feedback/m2_rejected_samples.jsonl`).
+- Every successful prediction is appended to `M2_INFERENCE_LOG_PATH` (default `/data/feedback/m2_inference_log.jsonl`) — full features, rule flags, badge, score, and `model_version`.
 
 **Rollback a specific version:**
 ```bash
@@ -309,6 +329,10 @@ docker run -p 8002:8002 \
 | POST | `/admin/reload` | Hot-reload model from MLflow (optionally pin a version) |
 | GET | `/metrics` | Prometheus metrics |
 
+**Input validation & lineage logging:**
+- `/forecast/features` validates each row: requires non-empty `project_category`, `history_month_count ≥ 3`, non-negative `monthly_spend ≤ 100k`, `month_num ∈ [1,12]`, `quarter ∈ [1,4]`. Bad rows return HTTP 400 and are appended to `M3_REJECTED_LOG_PATH` (default `/data/m3_feedback/m3_rejected.jsonl`).
+- Every successful forecast batch is appended to `M3_INFERENCE_LOG_PATH` (default `/data/m3_feedback/m3_inference.jsonl`) — input rows, output forecasts, and `model_version`. Per-request latency is also recorded into the `m3_forecast_latency_seconds` Prometheus histogram.
+
 **Rollback a specific version:**
 ```bash
 curl -X POST http://localhost:8002/admin/reload?version=3
@@ -387,16 +411,17 @@ Services:
 | `m2-retrain-daemon` | — | M2 feedback-driven retrain + rollback |
 | `m3-serving` | 8002 | M3 forecast inference |
 | `m3-monitor-daemon` | — | M3 monthly retrain + rollback |
+| `load-generator` | — | Continuous synthetic M1/M2/M3 traffic (every `LOAD_CYCLE_SECONDS`, default 30s) — keeps inference logs flowing and exercises all M2 badge types |
 | `prometheus` | 9090 | Metrics scraping |
 | `grafana` | 3000 | Dashboards (admin pw: `neuralbudget`) |
 
-### URLs (Chameleon VM: `129.114.27.248`)
+### URLs (Chameleon VM: `129.114.26.3`)
 
 | Service | URL |
 |---|---|
-| ActualBudget | `https://129.114.27.248:3001` |
-| Grafana | `http://129.114.27.248:3000` (admin / neuralbudget) |
-| Prometheus | `http://129.114.27.248:9090` |
+| ActualBudget | `https://129.114.26.3:3001` |
+| Grafana | `http://129.114.26.3:3000` (admin / neuralbudget) |
+| Prometheus | `http://129.114.26.3:9090` |
 | MLflow | `http://129.114.25.192:8000` |
 
 MLflow UI: http://129.114.25.192:8000
@@ -423,6 +448,7 @@ Neural-Budget/
 │   ├── m1_ray/                # Active M1 training: XGBoost in a @ray.remote task + retrain daemon
 │   ├── m2/                    # M2 Isolation Forest training
 │   └── m3/                    # M3 HistGB training + monitor daemon
+├── scripts/                   # Continuous load generator (Dockerized)
 ├── monitoring/                # Prometheus + Grafana config
 ├── docker-compose.yml
 ├── AGENTS.md                  # Project spec and team roles
